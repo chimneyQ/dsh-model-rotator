@@ -6,21 +6,21 @@
 
 ---
 
-## 第 0 步：确认用户名（唯一必填的信息）
+## 第 0 步：用户名已就绪（无需再改）
 
-所有 URL 现在写的是 `chimney`（取自本机 `git config user.name`，
-`user.email=826766879@qq.com`），**这不一定等于你的 GitHub 账号名**。
+账号已确认为 **`chimneyQ`**：package.json 三处 URL、收录条目文件名与内容都已改写，
+并已提交（仓库里 `git remote` 也指向真实地址）。三处自查：
 
-先确认你的真实用户名，然后全局替换：
+```powershell
+Select-String -Path package.json -Pattern "github.com"
+Get-Content awesome-dsh-plugin-entry\data\plugins\*.yml
+```
+
+若将来要换账号，用仓库自带的准备脚本一步做完（改名 + 重算 SHA256SUMS + 重新提交）：
 
 ```powershell
 cd D:\DS_harness\dsh-model-rotator-publish
-# 把 <你的用户名> 换成真实值，下面命令会同时改文件名与内容
-$me = '<你的用户名>'
-(Get-Content package.json -Raw).Replace('chimney', $me) | Set-Content package.json -NoNewline
-Rename-Item awesome-dsh-plugin-entry\data\plugins\chimney__dsh-model-rotator.yml "$me`__dsh-model-rotator.yml"
-$f = "awesome-dsh-plugin-entry\data\plugins\$me`__dsh-model-rotator.yml"
-(Get-Content $f -Raw).Replace('chimney', $me) | Set-Content $f -NoNewline
+powershell -NoProfile -File .\upload-to-github.ps1 -User <新账号>
 ```
 
 改完自查（三处都应是你的用户名）：
@@ -56,12 +56,13 @@ git config --global url."https://gh-proxy.net/".insteadOf "https://github.com/"
 
 ```powershell
 cd D:\DS_harness\dsh-model-rotator-publish
-git init -b main
-git add .
-git commit -m "dsh-model-rotator: model auto-ranking and transparent failover"
-git remote add origin https://github.com/$me/dsh-model-rotator.git
+# 仓库已经 init / commit 完毕（含 .gitattributes），这里只需要设对远端并推送
+git remote set-url origin https://github.com/chimneyQ/dsh-model-rotator.git
 git push -u origin main
 ```
+
+> 若 push 报 TLS / schannel 失败：先确认 `git config --global --list` 里没有
+> `gh-proxy` 的 insteadOf（第 1 步），再重试；国内网络时通时断，重试即可。
 
 推送会要求凭据。本机 `gh` 未登录、凭据管理器里也没有 GitHub 条目，二选一：
 
