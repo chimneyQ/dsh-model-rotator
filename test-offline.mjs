@@ -2,7 +2,7 @@
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, classifyFailureKind, isNonChatModelId, quotaRestUntil, switchNoticeFor } from './index.js'
+import { apply, classifyFailureKind, isHostRefusal, isNonChatModelId, quotaRestUntil, switchNoticeFor } from './index.js'
 
 // Keep the file layer out of these assertions: the config path is read inside
 // apply(), so pointing it at a path that does not exist pins the suite to the
@@ -1122,6 +1122,83 @@ const quietHandle = (value) => ({
   } finally {
     if (priorStats === undefined) delete process.env.DSH_MODEL_ROTOR_STATS
     else process.env.DSH_MODEL_ROTOR_STATS = priorStats
+  }
+}
+
+// ---- scenario 23: a host refusal is not model evidence ------------------------
+// A refusal raised *around* the provider boundary - the harness or another plugin
+// answering with a dsh_* envelope, or a fault inside this plugin - arrives as an
+// ordinary error finish, so the walk used to write it straight into the route's
+// counters. That is how a healthy channel ended up cooled down and shown as
+// broken after a compaction call another plugin had refused: the failure was
+// this machine's, not the model's, and the cooling moved the ranking away from a
+// route that had done nothing wrong.
+{
+  const pluginFault = 'Error: cannot get required service "llm" in inactive context'
+  const wireRefusal = '422: {"type":"server_error","code":"dsh_compaction_refused","message":"refused"}'
+  check('23a the predicate claims host-side refusals only',
+    isHostRefusal(pluginFault) && isHostRefusal(wireRefusal)
+      && isHostRefusal('model-rotator: dispatch error')
+      && !isHostRefusal('429 insufficient balance')
+      && !isHostRefusal(''),
+    JSON.stringify([pluginFault, wireRefusal].map(m => isHostRefusal(m))))
+
+  // A refusal from around the provider boundary. The current model fails
+  // honestly, the next candidate is refused by the host, and a third one answers.
+  // The walk must keep going - the refusal says nothing about that route - the
+  // refusal must leave no trace on it, and the answer must not be adopted as the
+  // session's model, because the user's own model was never actually reached.
+  {
+    const { adoptions, seams } = seamsFor({ selected: ['切换'] })
+    const h = makeCtx((options, n) => (n === 1
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted' } } }]
+      : (n === 2
+        ? [{ type: 'finish', reason: { kind: 'error', failure: { message: wireRefusal } } }]
+        : [{ type: 'text-delta', index: 0, text: 'ok from ' + options.model }, { type: 'finish', reason: { kind: 'stop' } }])), seams, { route: true })
+    h.ctx.llm.listProviders = () => [{ id: 'provA' }, { id: 'provB' }, { id: 'provC' }]
+    const models = { provA: [{ id: 'alpha' }], provB: [{ id: 'beta' }], provC: [{ id: 'gamma' }] }
+    h.ctx.llm.registration = provider => ({ adapter: { listModels: async p => models[p] ?? [] } })
+    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 4, confirmSwitch: false }, {})
+    const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const list = await h.request('GET')
+    const refused = list.payload.models.find(m => m.key === 'provB/beta')
+    const real = list.payload.models.find(m => m.key === 'provA/alpha')
+    check('23b a wire refusal leaves the route unblamed',
+      refused?.failures === 0 && refused?.lastError === '' && refused?.rest === 0 && refused?.health === 'ok',
+      JSON.stringify(refused && { f: refused.failures, e: refused.lastError, k: refused.lastErrorKind, rest: refused.rest, h: refused.health }))
+    check('23bb the real provider failure is still on record',
+      real?.failures === 1 && /quota exhausted/.test(String(real?.lastError)),
+      JSON.stringify(real && { f: real.failures, e: real.lastError }))
+    check('23bc the walk still reached a model that answered',
+      switched(chunks) && h.attempted.length === 3 && adoptions.length === 0,
+      'attempted=' + h.attempted.join(',') + ' adoptions=' + adoptions.length)
+  }
+
+  // A fault inside this plugin. Unlike a wire refusal it cannot be walked off -
+  // the next candidate would hit the same wall - so the walk ends on it, and the
+  // caller still receives a finish rather than a stream that dies silently.
+  {
+    const { adoptions, seams } = seamsFor({ selected: ['切换'] })
+    const h = makeCtx((options, n) => (n === 1
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted' } } }]
+      : [{ type: 'finish', reason: { kind: 'error', failure: { message: pluginFault } } }]), seams, { route: true })
+    h.ctx.llm.listProviders = () => [{ id: 'provA' }, { id: 'provB' }, { id: 'provC' }]
+    const models = { provA: [{ id: 'alpha' }], provB: [{ id: 'beta' }], provC: [{ id: 'gamma' }] }
+    h.ctx.llm.registration = provider => ({ adapter: { listModels: async p => models[p] ?? [] } })
+    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 4, confirmSwitch: false }, {})
+    const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const list = await h.request('GET')
+    const refused = list.payload.models.find(m => m.key === 'provB/beta')
+    const fins = chunks.filter(c => c.type === 'finish')
+    check('23c a plugin fault leaves the route unblamed',
+      refused?.failures === 0 && refused?.lastError === '' && refused?.rest === 0,
+      JSON.stringify(refused && { f: refused.failures, e: refused.lastError, rest: refused.rest }))
+    check('23cb a plugin fault ends the walk instead of burning every candidate',
+      h.attempted.length === 2 && !h.attempted.includes('provC/gamma'),
+      'attempted=' + h.attempted.join(','))
+    check('23cc the caller still gets a finish, naming the fault',
+      fins.length === 1 && /inactive context/.test(String(fins[0]?.reason?.failure?.message)) && adoptions.length === 0,
+      JSON.stringify(fins[fins.length - 1]) + ' adoptions=' + adoptions.length)
   }
 }
 

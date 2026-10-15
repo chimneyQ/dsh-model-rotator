@@ -706,6 +706,29 @@ export function classifyFailureKind(message) {
 }
 
 /**
+ * A refusal that names this host rather than this model.
+ *
+ * Two families. A JSON envelope written by the harness or by another plugin -
+ * `"code":"dsh_*` - is a statement about this *host*: the call was refused around
+ * the provider boundary, so the model never got a chance to answer and its
+ * health says nothing about the route. And an error raised inside this plugin
+ * ("model-rotator: ...", or cordis refusing an injected service for an inactive
+ * fibre) never left the machine at all.
+ *
+ * Kept separate from classifyFailureKind on purpose: the kind is still recorded
+ * (the page shows it, and the cooldown policy reads it), but a host refusal must
+ * not be *counted* against the route. Counting it cools a healthy model down and
+ * pushes the ranking away from a route that did nothing wrong.
+ */
+export function isHostRefusal(message) {
+  const text = String(message ?? '')
+  if (text === '') return false
+  if (text.includes('model-rotator:')) return true
+  if (/cannot get required service .+ in inactive context/.test(text)) return true
+  return /"code"\s*:\s*"dsh_/.test(text)
+}
+
+/**
  * When a quota-exhausted model may be tried again.
  *
  * A provider that says "insufficient balance" is not going to change its mind
@@ -1197,14 +1220,14 @@ export function apply(ctx, config = {}, runtime = {}) {
       // "[object Object]" is unreadable - a legacy row written before failureText
       // existed.
       //
-      // 'cannot get required service ... in inactive context' is a bug inside this
-      // plugin, not a fact about the model: the dispatch never left the machine, so
+      // Anything isHostRefusal() names is a bug or a policy answer on this
+      // machine, not a fact about the model: the dispatch never left the host, so
       // blaming the model would mark a perfectly healthy route as broken and keep
       // its failure counter climbing. Clearing it here lets the route be judged on
       // its next real dispatch instead of on our own crash.
       const unusable = typeof row.lastError !== 'string'
         || row.lastError === '[object Object]'
-        || /cannot get required service .+ in inactive context/.test(row.lastError)
+        || isHostRefusal(row.lastError)
       if (unusable) healed += 1
       stat.lastError = unusable ? '' : row.lastError
       // The failure *count* has to go with it. Health is 'error' whenever the
@@ -1222,12 +1245,15 @@ export function apply(ctx, config = {}, runtime = {}) {
         // following boot would restore it and mark the route broken all over again.
         stat.purging = true
       }
-      stat.lastErrorKind = typeof row.lastErrorKind === 'string' ? row.lastErrorKind : ''
       // The prose is the measurement; the kind is only a verdict about it, and a
       // verdict written by an older build can be wrong. Re-reading it here means
       // a pattern added later relabels the history it was written for, instead of
       // the user seeing "unclassified" until that model happens to fail again.
-      if (stat.lastError !== '') stat.lastErrorKind = classifyFailureKind(stat.lastError)
+      //
+      // A healed row keeps no verdict at all: the page decides "broken" from the
+      // kind as much as from the counters, so a discarded prose that left its old
+      // kind behind would still show a healthy route as failed.
+      stat.lastErrorKind = stat.lastError === '' ? '' : classifyFailureKind(stat.lastError)
       stats.set(key, stat)
     }
     if (healed > 0) scheduleStatsSave()
@@ -1619,6 +1645,14 @@ export function apply(ctx, config = {}, runtime = {}) {
      * what the caller gets: the provider's words, not a paraphrase of them.
      */
     let lastHeldFinish = null
+    /**
+     * Set when some attempt this turn was refused by the host or by this plugin
+     * rather than by the provider. A turn like that must not read as "this model
+     * failed": nothing about the route was learned, so the user's own model stays
+     * the model, and only the attempt that really failed becomes the failure the
+     * caller sees.
+     */
+    let hostRefusalSeen = false
     // '' = not asked yet this turn, otherwise 'allow' or 'deny'.
     let switchVerdict = ''
     for (let index = 0; index < candidates.length; index += 1) {
@@ -1758,7 +1792,11 @@ export function apply(ctx, config = {}, runtime = {}) {
           if (!flowed) stat.empty += 1
           // A retry that served content is the switch the user asked to see: make
           // it this session's model so the conversation stops naming the failed one.
-          if (index > 0 && flowed && cfg.adoptSwitchedModel) adoptServedModel(pair)
+          // A turn that also saw a host refusal is the exception: at least one
+          // dispatch never reached a provider, so an answer here does not mean the
+          // user's model is unreachable, and adopting would change their model
+          // behind a fault rather than behind a failure.
+          if (index > 0 && flowed && cfg.adoptSwitchedModel && !hostRefusalSeen) adoptServedModel(pair)
           // Tell the reader which model answered instead of theirs. Recorded here
           // and delivered at the turn boundary (see the notice listener), because
           // this is the moment the walk actually left the model the user picked.
@@ -1791,9 +1829,32 @@ export function apply(ctx, config = {}, runtime = {}) {
         // The kind, not the prose, is what the cooldown policy reads: a quota
         // wall rests until tomorrow, a blip keeps the ordinary backoff.
         const failedKind = classifyFailureKind(failedBecause)
-        stat.failures += 1
-        stat.lastError = failedBecause
-        stat.lastErrorKind = failedKind
+        // A refusal that names the host - a \`"code":"dsh_*\` envelope from the
+        // harness or from another plugin, or an error this plugin raised itself -
+        // is not evidence about this route. Recording it as a failure cooled a
+        // healthy model down and pushed the ranking away from it, which is the
+        // exact complaint "it marked a good model bad" the harness-side healing
+        // already had to undo on the next boot. Worse, when the refusal was
+        // raised *because* a switch was attempted, it also wrote itself over the
+        // provider failure that caused the switch, burying the real reason.
+        // So: trust the exception (believe the failure at once, count it,
+        // surface it), or drop it entirely - never let it blame a model.
+        const hostRefusal = isHostRefusal(failedBecause)
+        // Two different things wear the same label. A dsh_* envelope arrives over
+        // the wire: the harness or another plugin refused the call around the
+        // provider boundary, so the walk keeps looking for a model that answers.
+        // An internal marker ("inactive context", "model-rotator: ...") is this
+        // machine's own fault, and asking the next candidate would hit the same
+        // wall - but it must still be *trusted* when the dispatch itself threw,
+        // because masking it would hand the caller a stream that never emits.
+        const internalFault = hostRefusal && !/"code"\s*:\s*"dsh_/.test(failedBecause)
+        if (hostRefusal) hostRefusalSeen = true
+        const trustedFailure = dispatchError !== null && internalFault
+        if (!hostRefusal || trustedFailure) {
+          stat.failures += 1
+          stat.lastError = failedBecause
+          stat.lastErrorKind = failedKind
+        }
 
         if (failureYielded !== null) {
           // The error chunk is already in the consumer's hands; retrying now
@@ -1801,12 +1862,21 @@ export function apply(ctx, config = {}, runtime = {}) {
           // honest record of what failed. lastFailure is deliberately not set:
           // the caller's own error is the truth, and wrapping it again only
           // buries the provider's words under ours.
-          stat.consecutiveFailures += 1
-          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+          if (!hostRefusal || trustedFailure) {
+            stat.consecutiveFailures += 1
+            stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+          }
+          // The error chunk is already in the consumer's hands, so the walk ends
+          // here either way - and it must, because a fault of ours would repeat
+          // verbatim for every remaining candidate.
           return
         }
 
-        lastFailure = failedBecause
+        // A host refusal is not this route's failure and must not overwrite the
+        // provider error that actually started the walk. The refusal chunk itself
+        // is still held as the last finish: if nothing answers, that refusal is
+        // the honest reason the turn ended, and the reader has to see it.
+        if (!hostRefusal || trustedFailure) lastFailure = failedBecause
         // Remember what the provider actually said. The walk may still find a
         // model that answers, in which case this is discarded; if it does not,
         // the caller gets the provider's own error instead of a paraphrase.
@@ -1829,9 +1899,24 @@ export function apply(ctx, config = {}, runtime = {}) {
           continue
         }
 
-        // The failure is believed now: cool the model down and walk on.
-        stat.consecutiveFailures += 1
-        stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+        // The failure is believed now: cool the model down and walk on - but only
+        // when the model is what failed. A host refusal cools nothing, so the
+        // route stays fully available to the next turn.
+        if (!hostRefusal || trustedFailure) {
+          stat.consecutiveFailures += 1
+          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+        }
+
+        // A fault of ours ends the walk. Every further candidate would hit the
+        // same wall - the refusal came from this machine, not from the network -
+        // so spending the rest of the budget on it only delays the honest error.
+        if (internalFault && !trustedFailure) {
+          yield abandonChunk ?? {
+            type: 'finish',
+            reason: { kind: 'error', failure: { message: failedBecause } },
+          }
+          return
+        }
 
         if (aborted) {
           // The caller stopped the turn (Stop, a deadline, a closed client).

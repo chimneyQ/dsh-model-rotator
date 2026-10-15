@@ -45,7 +45,7 @@ if (Test-Path $oldEntry) {
 }
 
 # ---- 2. SHA256SUMS must describe the bytes that are actually shipped -------
-$listed = @('index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'LICENSE', 'package.json')
+$listed = @('index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'README.zh.md', 'LICENSE', 'package.json')
 $lines = foreach ($f in $listed) {
     $h = (Get-FileHash (Join-Path $dir $f) -Algorithm SHA256).Hash.ToLower()
     '{0}  {1}' -f $h, $f
