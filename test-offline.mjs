@@ -1075,6 +1075,47 @@ const quietHandle = (value) => ({
   check('21b discovery does not keep reading a deactivated ctx.llm', liveReads <= 2, 'liveReads=' + liveReads)
 }
 
+// ---- scenario 22: a plugin-internal dispatch error is not model evidence ------
+// 'cannot get required service "llm" in inactive context' described a bug in this
+// plugin, not a fact about the model: the dispatch never left the machine. A row
+// carrying it must not be restored as a failure, or a healthy route stays marked
+// broken until it happens to answer again.
+{
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const dir = mkdtempSync(join(tmpdir(), 'rotator-inactive-'))
+  const priorStats = process.env.DSH_MODEL_ROTOR_STATS
+  process.env.DSH_MODEL_ROTOR_STATS = join(dir, 'stats.json')
+  // Seed the file BEFORE apply: hydrateStats() reads once on first use, so a write
+  // after the harness is mounted would arrive too late to be restored at all.
+  writeFileSync(join(dir, 'stats.json'), JSON.stringify({
+    version: 1,
+    rows: {
+      'provA/beta': {
+        savedAt: Date.now(), attempts: 6, successes: 0, failures: 6, consecutiveFailures: 6,
+        cooldownUntil: 0, lastError: 'Error: cannot get required service "llm" in inactive context', lastErrorKind: '',
+      },
+      'provB/gamma': {
+        savedAt: Date.now(), attempts: 2, successes: 0, failures: 2, consecutiveFailures: 2,
+        cooldownUntil: 0, lastError: '429 insufficient balance', lastErrorKind: '',
+      },
+    },
+  }), 'utf8')
+  const h = makeCtx(() => [], undefined, { sameStats: true, route: true })
+  try {
+    apply(h.ctx, {}, {})
+    const list = await h.request('GET')
+    const saved = list.payload.models.find(m => m.key === 'provA/beta')
+    const kept = list.payload.models.find(m => m.key === 'provB/gamma')
+    // Counters are cleared with the prose, so the route reads as usable again
+    // rather than as a route with failures on record.
+    check('22a a plugin-internal dispatch error is not carried forward', saved.health === 'ok' && saved.failures === 0 && saved.attempts === 0, JSON.stringify(saved.health + ':' + saved.lastErrorKind + ':' + saved.failures + '/' + saved.attempts))
+    check('22b a real provider failure is still carried forward', kept.health === 'error' && kept.lastErrorKind === 'quota', JSON.stringify(kept.health + ':' + kept.lastErrorKind))
+  } finally {
+    if (priorStats === undefined) delete process.env.DSH_MODEL_ROTOR_STATS
+    else process.env.DSH_MODEL_ROTOR_STATS = priorStats
+  }
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))

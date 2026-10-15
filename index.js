@@ -1183,10 +1183,31 @@ export function apply(ctx, config = {}, runtime = {}) {
       stat.failures = Math.max(Math.trunc(numberOr(row.failures, 0)), 0)
       stat.consecutiveFailures = Math.max(Math.trunc(numberOr(row.consecutiveFailures, 0)), 0)
       stat.cooldownUntil = Math.max(numberOr(row.cooldownUntil, 0), 0)
-      // A legacy row written before failureText existed can carry the unreadable
-      // "[object Object]" prose; treat it as no prose so the record self-heals
-      // (an empty lastError is skipped by the classifier and never re-saved).
-      stat.lastError = typeof row.lastError === 'string' && row.lastError !== '[object Object]' ? row.lastError : ''
+      // Two kinds of prose are not measurements and must not survive a restart.
+      //
+      // "[object Object]" is unreadable - a legacy row written before failureText
+      // existed.
+      //
+      // 'cannot get required service ... in inactive context' is a bug inside this
+      // plugin, not a fact about the model: the dispatch never left the machine, so
+      // blaming the model would mark a perfectly healthy route as broken and keep
+      // its failure counter climbing. Clearing it here lets the route be judged on
+      // its next real dispatch instead of on our own crash.
+      const unusable = typeof row.lastError !== 'string'
+        || row.lastError === '[object Object]'
+        || /cannot get required service .+ in inactive context/.test(row.lastError)
+      stat.lastError = unusable ? '' : row.lastError
+      // The failure *count* has to go with it. Health is 'error' whenever the
+      // consecutive-failure counter is non-zero, so clearing only the prose would
+      // leave a healthy route displayed as broken - which is exactly what the
+      // stale rows looked like. The counters are rebuilt by real dispatches.
+      if (unusable) {
+        stat.attempts = 0
+        stat.successes = 0
+        stat.failures = 0
+        stat.consecutiveFailures = 0
+        stat.cooldownUntil = 0
+      }
       stat.lastErrorKind = typeof row.lastErrorKind === 'string' ? row.lastErrorKind : ''
       // The prose is the measurement; the kind is only a verdict about it, and a
       // verdict written by an older build can be wrong. Re-reading it here means
