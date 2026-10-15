@@ -16,6 +16,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
+    "LICENSE",
     "vendor"
   ],
   "keywords": [
@@ -54,9 +55,11 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node test-offline.mjs && node test-settings.mjs && node test-client.mjs",
-    "test:offline": "node test-offline.mjs",
-    "test:settings": "node test-settings.mjs",
-    "test:client": "node test-client.mjs"
+    "test": "node --check index.js && node --check client.js",
+    "check:syntax": "node --check index.js && node --check client.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
