@@ -1,0 +1,13 @@
+# Dependencies pulled by a user's own install (never committed).
+node_modules/
+
+# BUT: the plugin ships its own schemastery copy on purpose. The host needs a
+# schema library inside its own process, and a profile that links this package
+# from outside its node_modules cannot resolve a bare import - so vendor/ must
+# travel with the repo. Re-including it here is not a mistake.
+!vendor/
+!vendor/node_modules/
+!vendor/node_modules/**
+
+*.log
+*.tmp

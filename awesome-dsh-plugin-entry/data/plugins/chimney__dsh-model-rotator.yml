@@ -1,0 +1,6 @@
+url: https://github.com/chimney/dsh-model-rotator
+name: chimney/dsh-model-rotator
+category: model
+description:
+  en: 'Ranks discovered DeepSeek Harness models by measured connectivity and speed, switches to the next candidate inside the same turn when the current one fails with no output, and ships a settings page with a grouped model list, per-channel switches and a quota-aware cooldown.'
+  zh: '鎸夊疄娴嬭繛閫氱巼涓庨€熷害瀵瑰凡鍙戠幇鐨?DSH 妯″瀷鎺掑簭锛屽綋鍓嶆ā鍨嬫棤杈撳嚭鍗冲け璐ユ椂鍦ㄥ悓涓€杞唴鍒囨崲鍒颁笅涓€鍊欓€夛紱璁剧疆椤垫彁渚涘垎缁勬ā鍨嬪垪琛ㄣ€佹暣娓犻亾寮€鍏充笌棰濆害鎰熺煡鍐峰嵈銆?

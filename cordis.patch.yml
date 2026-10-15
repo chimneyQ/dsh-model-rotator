@@ -1,0 +1,13 @@
+# dsh-model-rotator bundle layer.
+#
+# A bundle layer is applied automatically when the package is installed, so a
+# profile that runs `dsh plugin --profile desktop add <this directory>` gets this
+# wiring without any manual cordis.patch.yml edits.
+#
+# This plugin touches NO model/provider configuration (llm-pi-ai providers and
+# agent-default-model stay untouched); it only observes the llm/stream
+# waterfall at runtime.
+- insert:
+    - id: model-rotator
+      name: dsh-model-rotator
+      config: {}

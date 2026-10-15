@@ -1,0 +1,7 @@
+# Ship the files byte-for-byte.
+#
+# The plugin's SHA256SUMS.txt describes the exact bytes in this repository, and a
+# user verifying it must get the same hashes. `-text` disables Git's end-of-line
+# conversion for every path, so a checkout on any platform reproduces the bytes
+# that were committed (and that the hash list names).
+* -text

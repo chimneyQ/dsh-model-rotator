@@ -1,0 +1,61 @@
+{
+  "name": "dsh-model-rotator",
+  "version": "0.1.0",
+  "description": "Model auto-ranking and transparent failover for DeepSeek Harness: ranks discovered models by measured connectivity and speed, switches to the next candidate inside the same turn when the current one is unusable, and ships a grouped model list with per-channel switches. Never modifies model or provider configuration.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "vendor"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "failover",
+    "model-routing",
+    "llm",
+    "resilience"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chimney/dsh-model-rotator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chimney/dsh-model-rotator/issues"
+  },
+  "homepage": "https://github.com/chimney/dsh-model-rotator#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node test-offline.mjs && node test-settings.mjs && node test-client.mjs",
+    "test:offline": "node test-offline.mjs",
+    "test:settings": "node test-settings.mjs",
+    "test:client": "node test-client.mjs"
+  }
+}
