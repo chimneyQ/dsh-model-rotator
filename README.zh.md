@@ -254,10 +254,18 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
 ## 安装
 
 ```bash
+dsh plugin --profile desktop add github:chimneyQ/dsh-model-rotator
+```
+
+如果你手上是本地目录，同一条命令换成路径即可：
+
+```bash
 dsh plugin --profile desktop add <本目录路径>
 ```
 
-包内声明了 `dsh.bundle.patch`，所以它自带的 `cordis.patch.yml` 会自动接线。装完需要**完整重启**应用才会加载。
+包内声明了 `dsh.bundle.patch`，所以它自带的 `cordis.patch.yml` 会自动接线；它没有任何需要构建的依赖。装完需要**完整重启**应用才会加载。
+
+确认宿主是否真的把它接上了（首次安装失败可能只写下依赖、却没把插件加入 `dsh.profile.bundles`）：检查 `<DSH_HOME>/profiles/desktop/package.json` 的 `dsh.profile.bundles` 里是否列出 `dsh-model-rotator`。
 
 ## 测试
 

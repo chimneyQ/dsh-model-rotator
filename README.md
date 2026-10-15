@@ -445,11 +445,23 @@ the session), `failure verdict` and `switch order`.
 ## Install
 
 ```
+dsh plugin --profile desktop add github:chimneyQ/dsh-model-rotator
+```
+
+From a local checkout, the same command takes the directory instead:
+
+```
 dsh plugin --profile desktop add <path-to-this-directory>
 ```
 
 The package declares `dsh.bundle.patch`, so its `cordis.patch.yml` wires the
-plugin automatically. A full app restart is required for the host to load it.
+plugin automatically, and it has no dependencies to build. A full app restart is
+required for the host to load it.
+
+To confirm the host actually wired it up (a failed first install can leave the
+dependency recorded without adding the plugin to `dsh.profile.bundles`), check
+that `dsh.profile.bundles` in `<DSH_HOME>/profiles/desktop/package.json` lists
+`dsh-model-rotator`.
 
 ## Test
 
