@@ -38,7 +38,11 @@ ck('12 grouped list exists', /groups/.test(index) && /data\.groups/.test(client)
 ck('13 vendor label is read from the registered route', /entry\.name/.test(index))
 
 // 5. the entry YAML parses
-const yamlFile = 'awesome-dsh-plugin-entry/data/plugins/chimney__dsh-model-rotator.yml'
+// The account is derived from the manifest, not hardcoded: the entry file is
+// named <account>__dsh-model-rotator.yml, and that name moves with the
+// package's repository URL.
+const account = (manifest.repository?.url ?? '').replace(/^git\+/, '').match(/github\.com\/([^/]+)\//)?.[1] ?? 'chimney'
+const yamlFile = 'awesome-dsh-plugin-entry/data/plugins/' + account + '__dsh-model-rotator.yml'
 ck('14 the submission entry is present', existsSync(pub + '/' + yamlFile))
 let yamlOk = false
 let yamlDetail = ''
