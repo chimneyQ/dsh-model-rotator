@@ -19,7 +19,7 @@ Get-Content awesome-dsh-plugin-entry\data\plugins\*.yml
 若将来要换账号，用仓库自带的准备脚本一步做完（改名 + 重算 SHA256SUMS + 重新提交）：
 
 ```powershell
-cd D:\DS_harness\dsh-model-rotator-publish
+cd D:\DS_harness\插件开发\dsh-model-rotator-publish
 powershell -NoProfile -File .\upload-to-github.ps1 -User <新账号>
 ```
 
@@ -55,7 +55,7 @@ git config --global url."https://gh-proxy.net/".insteadOf "https://github.com/"
 ## 第 2 步：建仓并推送
 
 ```powershell
-cd D:\DS_harness\dsh-model-rotator-publish
+cd D:\DS_harness\插件开发\dsh-model-rotator-publish
 # 仓库已经 init / commit 完毕（含 .gitattributes），这里只需要设对远端并推送
 git remote set-url origin https://github.com/chimneyQ/dsh-model-rotator.git
 git push -u origin main
@@ -138,7 +138,7 @@ A: 规范里列的原因按频率是：只声明了 `dsh.client`（本包没这�
 A: 在 DSH 里执行：
 
 ```powershell
-dsh plugin --profile desktop add D:\DS_harness\dsh-model-rotator-publish
+dsh plugin --profile desktop add D:\DS_harness\插件开发\dsh-model-rotator-publish
 ```
 
 装完需要**完全重启** DeepSeek Harness，然后打开 设置 → 模型自动切换。

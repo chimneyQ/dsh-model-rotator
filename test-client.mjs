@@ -20,7 +20,7 @@ import { pathToFileURL } from 'node:url'
 
 const profile = 'C:/Users/lenovo/.dsh/profiles/desktop'
 const z = createRequire(join(profile, 'package.json'))('@deepseek-ai/schemastery')
-const pluginDir = 'D:/DS_harness/dsh-model-rotator'
+const pluginDir = 'D:/DS_harness/插件开发/dsh-model-rotator'
 const results = []
 const check = (label, cond, extra = '') => results.push([cond ? 'PASS' : 'FAIL', label, extra])
 

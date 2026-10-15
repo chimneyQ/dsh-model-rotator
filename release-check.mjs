@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-const pub = 'D:/DS_harness/dsh-model-rotator-publish'
-const dev = 'D:/DS_harness/dsh-model-rotator'
+const pub = 'D:/DS_harness/插件开发/dsh-model-rotator-publish'
+const dev = 'D:/DS_harness/插件开发/dsh-model-rotator'
 const read = (f) => readFileSync(pub + '/' + f, 'utf8')
 const manifest = JSON.parse(read('package.json'))
 const index = read('index.js')
