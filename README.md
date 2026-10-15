@@ -1,5 +1,7 @@
 # dsh-model-rotator
 
+> [简体中文](./README.zh.md) | **English**
+
 Model auto-ranking and transparent failover for DeepSeek Harness.
 
 When the current model hits a quota wall, an expired credential, a rate limit or
