@@ -11,3 +11,6 @@ node_modules/
 
 *.log
 *.tmp
+
+# npm pack artefacts (the published tarball is rebuilt by the registry).
+*.tgz
