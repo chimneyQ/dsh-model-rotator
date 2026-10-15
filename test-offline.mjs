@@ -1048,6 +1048,33 @@ const quietHandle = (value) => ({
   check('20c the walk never re-reads a deactivated ctx.llm', liveReads === 0, 'liveReads=' + liveReads + ' attempted=' + stale.attempted.join(','))
 }
 
+// ---- scenario 21: discovery survives a deactivated context too ----------------
+// The same defect class as 20b, on the other half of the plugin: listProviders()
+// and registration() are read while building the candidate list, which happens
+// after awaits. A live ctx.llm read there failed the same way and left the walk
+// with no candidates at all.
+{
+  const h = makeCtx((options, n) => (n === 1
+    ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }]
+    : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]))
+  const realLlm = h.ctx.llm
+  apply(h.ctx, { retriesPerModel: 0, maxCandidates: 4, confirmSwitch: false }, {})
+  // One real read lets the plugin capture the service; every later live read
+  // throws the way cordis does for an inactive fibre.
+  let liveReads = 0
+  Object.defineProperty(h.ctx, 'llm', {
+    configurable: true,
+    get() {
+      liveReads += 1
+      if (liveReads === 1) return realLlm
+      throw new Error('cannot get required service "llm" in inactive context')
+    },
+  })
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('21a discovery still produced candidates after deactivation', h.attempted.length >= 2, 'attempted=' + h.attempted.join(','))
+  check('21b discovery does not keep reading a deactivated ctx.llm', liveReads <= 2, 'liveReads=' + liveReads)
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))

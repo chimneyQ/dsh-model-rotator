@@ -1200,15 +1200,44 @@ export function apply(ctx, config = {}, runtime = {}) {
   // ---- candidate discovery and ranking ----------------------------------------
 
   /**
+   * The llm service, captured the first time the plugin sees it and reused after.
+   *
+   * Every read of `ctx.llm` goes through here rather than through the live
+   * property. Cordis refuses an injected service once its fibre deactivates
+   * (`cannot get required service "llm" in inactive context`), and a turn can be
+   * parked and resumed - an automatic continuation, a background turn - while
+   * this plugin is midway through discovery or a failover walk. Reading the live
+   * property there did not just fail: it turned a switch into a silent no-op that
+   * still consumed a candidate.
+   *
+   * Captured lazily rather than once at apply time: a plugin loads before some
+   * host services publish, so resolving only at apply time would pin `undefined`
+   * forever on a slow boot. The first successful read sticks; after that the live
+   * property is never consulted again.
+   */
+  let llmService
+  function llmRef() {
+    if (llmService !== undefined) return llmService
+    // Only while nothing has been captured yet, and only inside a synchronous
+    // frame (never after an await), so the read cannot land in a dead fibre.
+    const live = typeof ctx.llm?.stream === 'function' || typeof ctx.llm?.listProviders === 'function' ? ctx.llm : undefined
+    if (live !== undefined) llmService = live
+    return llmService
+  }
+  // Resolve as early as this module's own scope is active.
+  llmRef()
+
+  /**
    * Enumerate live "provider/model" ids. A provider qualifies only when the llm
    * service exposes a registration with a listModels-capable adapter - the same
    * admission the harness itself uses to decide a route is dialable.
    */
   async function discoverPairsRaw() {
     const out = []
-    if (typeof ctx.llm?.listProviders !== 'function') return out
+    const llm = llmRef()
+    if (typeof llm?.listProviders !== 'function') return out
     let providers = []
-    try { providers = ctx.llm.listProviders() } catch { return out }
+    try { providers = llm.listProviders() } catch { return out }
     for (const entry of Array.isArray(providers) ? providers : []) {
       const provider = entry !== null && typeof entry === 'object' && typeof entry.id === 'string' ? entry.id : ''
       if (provider === '') continue
@@ -1225,7 +1254,7 @@ export function apply(ctx, config = {}, runtime = {}) {
         : (typeof entry.displayName === 'string' ? entry.displayName : '')
       const displayName = label === provider ? '' : label
       let adapter
-      try { adapter = ctx.llm.registration?.(provider)?.adapter } catch { adapter = undefined }
+      try { adapter = llm.registration?.(provider)?.adapter } catch { adapter = undefined }
       if (adapter === undefined || typeof adapter.listModels !== 'function') continue
       let listed = []
       try { listed = await adapter.listModels(provider) } catch { continue }
@@ -1529,13 +1558,11 @@ export function apply(ctx, config = {}, runtime = {}) {
    */
   async function* rotateStream(options, next) {
     const cfg = currentConfig()
-    // Resolved once, before the first await. Cordis deactivates a fiber's
-    // injected services while a turn is parked (an automatic continuation, a
-    // resumed background turn), and a live `ctx.llm` read inside the walk then
-    // throws `cannot get required service "llm" in inactive context` - which
-    // turned a switch into a no-op that still cost a candidate. Capturing the
-    // dispatcher while the context is active keeps every later dispatch working.
-    const llm = ctx.llm
+    // Same captured service as discovery uses (see llmService). Cordis deactivates
+    // a fiber's injected services while a turn is parked, and a live `ctx.llm` read
+    // inside the walk then throws `cannot get required service "llm" in inactive
+    // context` - which turned a switch into a no-op that still cost a candidate.
+    const llm = llmRef()
     let candidates
     try {
       candidates = await rankCandidates(options, cfg)
@@ -1814,7 +1841,7 @@ export function apply(ctx, config = {}, runtime = {}) {
 
   // ---- mount ------------------------------------------------------------------
 
-  if (typeof ctx.llm?.stream === 'function') {
+  if (typeof llmRef()?.stream === 'function') {
     ctx.on('llm/stream', (options, next) => {
       const cfg = currentConfig()
       if (!cfg.enabled) return next()
@@ -2393,7 +2420,7 @@ export function apply(ctx, config = {}, runtime = {}) {
     },
     output: stringOutput,
     async execute(args) {
-      if (typeof ctx.llm?.stream !== 'function') return 'llm/stream is unavailable; nothing was probed.'
+      if (typeof llmRef()?.stream !== 'function') return 'llm/stream is unavailable; nothing was probed.'
       const cfg = currentConfig()
       const limit = Math.min(Math.max(Math.trunc(numberOr(args.limit, 5)), 1), 20)
       const prompt = typeof args.prompt === 'string' && args.prompt !== '' ? args.prompt : 'ping'
@@ -2414,7 +2441,7 @@ export function apply(ctx, config = {}, runtime = {}) {
         const controller = new AbortController()
         try {
           timer = setTimeout(() => controller.abort(), timeoutMs)
-          const stream = ctx.llm.stream({
+          const stream = llmRef().stream({
             provider: pair.provider,
             model: pair.model,
             messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
