@@ -1081,7 +1081,7 @@ const quietHandle = (value) => ({
 // carrying it must not be restored as a failure, or a healthy route stays marked
 // broken until it happens to answer again.
 {
-  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'rotator-inactive-'))
   const priorStats = process.env.DSH_MODEL_ROTOR_STATS
   process.env.DSH_MODEL_ROTOR_STATS = join(dir, 'stats.json')
@@ -1110,6 +1110,15 @@ const quietHandle = (value) => ({
     // rather than as a route with failures on record.
     check('22a a plugin-internal dispatch error is not carried forward', saved.health === 'ok' && saved.failures === 0 && saved.attempts === 0, JSON.stringify(saved.health + ':' + saved.lastErrorKind + ':' + saved.failures + '/' + saved.attempts))
     check('22b a real provider failure is still carried forward', kept.health === 'error' && kept.lastErrorKind === 'quota', JSON.stringify(kept.health + ':' + kept.lastErrorKind))
+    // A healed row also has to be *written back*. Omitting it from the payload
+    // would leave the stale copy in the file, and the following boot would restore
+    // it and mark a healthy route broken all over again.
+    // The heal schedules a debounced write; wait for it rather than assuming one.
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    const written = JSON.parse(readFileSync(join(dir, 'stats.json'), 'utf8')).rows ?? {}
+    const healedRow = written['provA/beta']
+    const stale = healedRow === undefined || (healedRow.lastError ?? '') !== '' || (healedRow.failures ?? 0) !== 0
+    check('22c a healed row is replaced on disk, not dropped', !stale, JSON.stringify(healedRow ?? null))
   } finally {
     if (priorStats === undefined) delete process.env.DSH_MODEL_ROTOR_STATS
     else process.env.DSH_MODEL_ROTOR_STATS = priorStats

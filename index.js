@@ -483,6 +483,9 @@ function emptyStat() {
     lastErrorKind: '',
     consecutiveFailures: 0,
     cooldownUntil: 0,
+    // Set only when a restored row was healed rather than measured: it makes the
+    // next write replace that row instead of omitting it (see saveStats).
+    purging: false,
   }
 }
 
@@ -1152,7 +1155,9 @@ export function apply(ctx, config = {}, runtime = {}) {
     if (ttl <= 0) return
     const rows = {}
     for (const [key, stat] of stats) {
-      if (stat.attempts === 0 && stat.cooldownUntil === 0) continue
+      // A healed row carries no counters by design, but it still has to be written:
+      // omitting it is what left the stale copy in the file for the next boot.
+      if (stat.attempts === 0 && stat.cooldownUntil === 0 && stat.purging !== true) continue
       rows[key] = persistedRow(stat, nowMs)
     }
     mkdirSync(dirname(statsPath), { recursive: true })
@@ -1173,6 +1178,10 @@ export function apply(ctx, config = {}, runtime = {}) {
     const ttl = numberOr(currentConfig().statsPersistTtlMs, SETTINGS_DEFAULTS.statsPersistTtlMs)
     if (ttl <= 0) return
     const nowMs = Date.now()
+    // Counts the rows this read had to heal. The file is only rewritten when a
+    // model is next attempted, so without an explicit save here a healed row would
+    // sit uncorrected on disk and the following boot would restore it.
+    let healed = 0
     for (const [key, row] of Object.entries(rows)) {
       if (row === null || typeof row !== 'object') continue
       const savedAt = numberOr(row.savedAt, 0)
@@ -1196,6 +1205,7 @@ export function apply(ctx, config = {}, runtime = {}) {
       const unusable = typeof row.lastError !== 'string'
         || row.lastError === '[object Object]'
         || /cannot get required service .+ in inactive context/.test(row.lastError)
+      if (unusable) healed += 1
       stat.lastError = unusable ? '' : row.lastError
       // The failure *count* has to go with it. Health is 'error' whenever the
       // consecutive-failure counter is non-zero, so clearing only the prose would
@@ -1207,6 +1217,10 @@ export function apply(ctx, config = {}, runtime = {}) {
         stat.failures = 0
         stat.consecutiveFailures = 0
         stat.cooldownUntil = 0
+        // Flagged so the next write replaces the stale entry on disk. Dropping it
+        // from the payload instead would leave the old row in the file, and the
+        // following boot would restore it and mark the route broken all over again.
+        stat.purging = true
       }
       stat.lastErrorKind = typeof row.lastErrorKind === 'string' ? row.lastErrorKind : ''
       // The prose is the measurement; the kind is only a verdict about it, and a
@@ -1216,6 +1230,7 @@ export function apply(ctx, config = {}, runtime = {}) {
       if (stat.lastError !== '') stat.lastErrorKind = classifyFailureKind(stat.lastError)
       stats.set(key, stat)
     }
+    if (healed > 0) scheduleStatsSave()
   }
 
   // ---- candidate discovery and ranking ----------------------------------------
