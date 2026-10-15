@@ -1350,7 +1350,23 @@ export function apply(ctx, config = {}, runtime = {}) {
       ranked.push({ pair, key, score })
     }
     ranked.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-    const ordered = [current, ...ranked.map(row => row.pair)]
+
+    // One candidate per model *family*, not one per channel. The same model on
+    // five channels shares its fate - one quota wall, one dead endpoint - so
+    // keeping all five in the walk spends the whole candidate budget retrying
+    // what is effectively one model, and the switch notice then reads as
+    // "switched to the same model again". The best-scoring channel of each
+    // family survives; its siblings wait for another turn (no cooldown is
+    // written for them, so a later walk can still pick them).
+    const familySeen = new Set()
+    const byFamily = []
+    for (const row of ranked) {
+      const family = String(row.pair.model).toLowerCase()
+      if (familySeen.has(family)) continue
+      familySeen.add(family)
+      byFamily.push(row)
+    }
+    const ordered = [current, ...byFamily.map(row => row.pair)]
 
     // A pin short-circuits the ranking: the user asked for this head explicitly.
     if (pinned !== '' && pinned !== current.provider + '/' + current.model) {
@@ -1513,6 +1529,13 @@ export function apply(ctx, config = {}, runtime = {}) {
    */
   async function* rotateStream(options, next) {
     const cfg = currentConfig()
+    // Resolved once, before the first await. Cordis deactivates a fiber's
+    // injected services while a turn is parked (an automatic continuation, a
+    // resumed background turn), and a live `ctx.llm` read inside the walk then
+    // throws `cannot get required service "llm" in inactive context` - which
+    // turned a switch into a no-op that still cost a candidate. Capturing the
+    // dispatcher while the context is active keeps every later dispatch working.
+    const llm = ctx.llm
     let candidates
     try {
       candidates = await rankCandidates(options, cfg)
@@ -1559,7 +1582,7 @@ export function apply(ctx, config = {}, runtime = {}) {
           const retryOptions = { ...options, provider: pair.provider, model: pair.model }
           retryMarkers.add(retryOptions)
           try {
-            stream = ctx.llm.stream(retryOptions)
+            stream = llm.stream(retryOptions)
           } catch (error) {
             dispatchError = error
           }
@@ -1677,17 +1700,26 @@ export function apply(ctx, config = {}, runtime = {}) {
           // and delivered at the turn boundary (see the notice listener), because
           // this is the moment the walk actually left the model the user picked.
           if (index > 0 && cfg.noticeSwitch) {
-            noticeQueue.push({
-              // "from" is the model the turn was dispatched with - the one the user
-              // is looking at - not the model of whichever attempt failed last.
-              from: {
-                provider: String(options.provider ?? ''),
-                model: String(options.model ?? ''),
-                displayName: displayNameOf(String(options.provider ?? '')),
-              },
-              to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
-              reason: classifyFailureKind(String(lastFailure ?? '')),
-            })
+            // One notice per *distinct* destination per turn. The same model on
+            // another channel is a legitimate switch the first time it is
+            // announced; announcing it again for the next sibling channel is what
+            // makes the reader see "switched to the same model" twice. A family
+            // is named by its model id, which is exactly the part the reader
+            // recognises.
+            const alreadyNamed = noticeQueue.some(entry => entry.to.model === pair.model)
+            if (!alreadyNamed) {
+              noticeQueue.push({
+                // "from" is the model the turn was dispatched with - the one the user
+                // is looking at - not the model of whichever attempt failed last.
+                from: {
+                  provider: String(options.provider ?? ''),
+                  model: String(options.model ?? ''),
+                  displayName: displayNameOf(String(options.provider ?? '')),
+                },
+                to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
+                reason: classifyFailureKind(String(lastFailure ?? '')),
+              })
+            }
           }
           return
         }

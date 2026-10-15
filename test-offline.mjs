@@ -994,6 +994,60 @@ const quietHandle = (value) => ({
   }
 }
 
+// ---- scenario 20: one candidate per model family, and a stable dispatcher ----
+// Two defects observed on a live host. (a) The same model configured on several
+// channels produced one candidate per channel, so a single shared quota wall
+// burned the whole walk on what is effectively one model and the switch notice
+// read as "switched to the same model again". (b) The dispatcher was read as a
+// live `ctx.llm` property inside the walk, which cordis refuses once the fibre
+// is inactive (an automatic continuation): the switch then threw
+// `cannot get required service "llm" in inactive context` and became a no-op.
+{
+  // (a) one family, one slot: provB and provC both serve 'gamma'.
+  const h = makeCtx((options, n) => (n === 1
+    ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }]
+    : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]))
+  h.ctx.llm.listProviders = () => [{ id: 'provA' }, { id: 'provB' }, { id: 'provC' }]
+  h.ctx.llm.registration = provider => ({ adapter: { listModels: async p => ({
+    provA: [{ id: 'alpha' }],
+    provB: [{ id: 'gamma' }],
+    provC: [{ id: 'gamma' }],
+  })[p] ?? [] } })
+  apply(h.ctx, { retriesPerModel: 0, maxCandidates: 8, confirmSwitch: false }, {})
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const gammaHits = h.attempted.filter(k => k.endsWith('/gamma'))
+  check('20a one model family occupies one candidate slot', gammaHits.length === 1, 'attempted=' + h.attempted.join(','))
+
+  // (b) the dispatcher is captured before the first await, so a deactivated
+  // context cannot turn a switch into a silent no-op.
+  const stale = makeCtx((options, n) => (n === 1
+    ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited' } } }]
+    : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]))
+  apply(stale.ctx, { retriesPerModel: 0, maxCandidates: 4, confirmSwitch: false }, {})
+  // Simulate what the host actually does: the turn dispatches while the fibre is
+  // still active (the harness itself had to call ctx.llm.stream to get here), and
+  // the fibre goes inactive while the walk is parked on an await. From that point
+  // every *live* `ctx.llm` read throws the way cordis does for an injected
+  // service in an inactive context. The dispatcher captured before the first
+  // await must keep the rest of the walk working - reading it live is exactly
+  // what turned a switch into a no-op.
+  let liveReads = 0
+  const realLlm = stale.ctx.llm
+  Object.defineProperty(stale.ctx, 'llm', {
+    configurable: true,
+    get() {
+      // The very first read is the harness reaching the waterfall; after the first
+      // attempt has been recorded the context is parked and reads must fail.
+      if (stale.attempted.length === 0) return realLlm
+      liveReads += 1
+      throw new Error('cannot get required service "llm" in inactive context')
+    },
+  })
+  await collect(stale.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('20b the walk keeps dispatching after the fibre deactivates', stale.attempted.length >= 2, 'attempted=' + stale.attempted.join(','))
+  check('20c the walk never re-reads a deactivated ctx.llm', liveReads === 0, 'liveReads=' + liveReads + ' attempted=' + stale.attempted.join(','))
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))
