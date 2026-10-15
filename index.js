@@ -1884,12 +1884,16 @@ export function apply(ctx, config = {}, runtime = {}) {
 
         const aborted = options.signal?.aborted === true
 
-        // Two kinds are settled before a retry could matter: a balance does not
-        // refill between two dispatches, and a request the provider refuses as
-        // unsupported is refused identically by the same provider. Spending the
-        // retries only delays the switch the user needs. Auth keeps its retries
-        // deliberately - a 403 raised by a burst-rate proxy does recover.
-        if (failedKind === 'quota' || failedKind === 'unsupported') noRetry = true
+        // Three kinds are settled before a retry could matter: a balance does not
+        // refill between two dispatches, a request the provider refuses as
+        // unsupported is refused identically by the same provider, and a refusal
+        // that came from this host (a dsh_* envelope, or a fault of ours) is
+        // decided on this machine and will answer the same way every time.
+        // Spending the retries only delays the switch the user needs - and for a
+        // fault of ours it spent them *and* slept the backoff before ending the
+        // turn on the same error. Auth keeps its retries deliberately: a 403
+        // raised by a burst-rate proxy does recover.
+        if (failedKind === 'quota' || failedKind === 'unsupported' || hostRefusal) noRetry = true
 
         // Retry the same model before calling it dead.
         if (retriesLeft > 0 && !noRetry && !aborted) {

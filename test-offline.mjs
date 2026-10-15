@@ -1200,6 +1200,37 @@ const quietHandle = (value) => ({
       fins.length === 1 && /inactive context/.test(String(fins[0]?.reason?.failure?.message)) && adoptions.length === 0,
       JSON.stringify(fins[fins.length - 1]) + ' adoptions=' + adoptions.length)
   }
+
+  // A host refusal must not be retried either. A quota wall and an unsupported
+  // request are already settled before a retry could matter, because neither
+  // changes between two dispatches; a refusal decided on this machine is the
+  // same kind of certainty. Retrying it spent the whole retry budget *and*
+  // slept the exponential backoff before ending the turn on the same error -
+  // measured at four dispatches and 1.8s of sleeping before this was fixed.
+  // The refused candidate answers with the same refusal every time, so its
+  // dispatch count is exactly what the retry policy spends.
+  for (const [label, message, endExpectation] of [
+    ['23d a wire refusal is not retried', '422: {"type":"server_error","code":"dsh_compaction_refused","message":"refused"}', 'provC/gamma'],
+    ['23e a plugin fault is not retried either', 'Error: cannot get required service "llm" in inactive context', null],
+  ]) {
+    const h = makeCtx((options) => {
+      if (options.provider === 'provA') return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted' } } }]
+      if (options.provider === 'provB') return [{ type: 'finish', reason: { kind: 'error', failure: { message } } }]
+      return [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]
+    })
+    h.ctx.llm.listProviders = () => [{ id: 'provA' }, { id: 'provB' }, { id: 'provC' }]
+    const models = { provA: [{ id: 'alpha' }], provB: [{ id: 'beta' }], provC: [{ id: 'gamma' }] }
+    h.ctx.llm.registration = provider => ({ adapter: { listModels: async p => models[p] ?? [] } })
+    // The retry budget is deliberately left at its default of 3: the claim is
+    // that a host refusal never reaches the retry branch at all.
+    apply(h.ctx, { maxCandidates: 4, confirmSwitch: false }, {})
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const betaDispatches = h.attempted.filter(k => k === 'provB/beta').length
+    const endedRight = endExpectation === null ? !h.attempted.includes('provC/gamma') : h.attempted.includes(endExpectation)
+    check(label + ' - one dispatch, not retriesPerModel',
+      betaDispatches === 1 && endedRight,
+      'dispatches=' + betaDispatches + ' attempted=' + h.attempted.join(','))
+  }
 }
 
 const failed = results.filter(r => r[0] === 'FAIL')
