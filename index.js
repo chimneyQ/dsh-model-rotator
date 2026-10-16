@@ -143,11 +143,27 @@ function noteFailure(where, error) {
  * The CJS build exports the z factory itself - a function object carrying
  * object/boolean/number as properties - so a check against "object" alone
  * would reject it.
+ *
+ * "has object()" is NOT enough. This machine carries a stale schemastery under
+ * the user home whose chain has no .volatile(). The anchors are scanned in
+ * profile-name order, so the `default` profile resolves to that copy, the old
+ * check accepted it, it won the anchor loop, and Config then threw at load time
+ * on the first .volatile() call - taking the whole plugin down before the
+ * working `desktop` copy was ever tried.
+ *
+ * So the chain this schema actually performs is exercised here, and only a copy
+ * that survives it is accepted. Anything else is recorded and the next anchor is
+ * tried, which is what lets the desktop copy win.
  */
 function isSchemaFactory(loaded) {
-  return loaded !== null
-    && (typeof loaded === 'object' || typeof loaded === 'function')
-    && typeof loaded.object === 'function'
+  if (loaded === null
+    || (typeof loaded !== 'object' && typeof loaded !== 'function')
+    || typeof loaded.object !== 'function') return false
+  try {
+    loaded.boolean().default(true).volatile().description('probe')
+    loaded.object({ probe: loaded.boolean().default(true).volatile() }).toJSON()
+    return true
+  } catch { return false }
 }
 
 /** Absolute directories that may hold this plugin, and so its vendor/ copy. */
@@ -193,7 +209,7 @@ function loadSchemastery() {
     try {
       const loaded = createRequire(anchor)('@deepseek-ai/schemastery')
       if (isSchemaFactory(loaded)) return loaded
-      SCHEMA_PROBE.push(anchor + ' -> resolved but is not the schema factory')
+      SCHEMA_PROBE.push(anchor + ' -> resolved, but the chain lacks volatile() (stale copy rejected)')
     } catch (error) {
       noteFailure(anchor, error)
     }

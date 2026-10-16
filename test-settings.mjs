@@ -11,10 +11,10 @@
  *      page does not own still comes from the file.
  */
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 
 const profile = 'C:/Users/lenovo/.dsh/profiles/desktop'
 const req = createRequire(join(profile, 'package.json'))
@@ -51,7 +51,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'rotator-settings-'))
 const cfgPath = join(tmp, 'config.json')
 process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
 
-const { apply, Config } = await import(pathToFileURL('D:/DS_harness/插件开发/dsh-model-rotator/index.js').href)
+const { apply, Config } = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'index.js')).href)
 
 // ---- 1. the schema the host will read ---------------------------------------
 check('1a Config is exported (page exists at all)', Config !== undefined && typeof Config.toJSON === 'function')

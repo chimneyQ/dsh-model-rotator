@@ -811,11 +811,15 @@ window.__ModuleLoader__.load({
         locale: NS,
         inject: () => card.inject()
       });
-      const serve = () => ctx.configForms.whileServed([MODEL_ROTATOR_NS], () => {
-        ctx.slots.inject("settings.section", () => ctx.slots.register(definition("settings.section", 20), ModelRotatorCard));
-        ctx.slots.inject("plugins.item", () => ctx.slots.register(definition("plugins.item", 45), ModelRotatorCard));
-      });
-      ctx.effect(serve, "model-rotator: page");
+      // Register unconditionally. `configForms.whileServed` is for a page whose edits a
+      // namespace ANOTHER plugin owns: it keeps that page hidden while the owner was never
+      // composed. This page edits OUR OWN namespace, so gating it silently hid the entry
+      // on deployments where the Host had not served the namespace - the gate fails with
+      // no error and zero cells registered, leaving an empty settings nav slot.
+      // The Host's own SettingsForm already renders an "unavailable" line when no form is
+      // served, so the unconditional registration degrades gracefully instead of vanishing.
+      ctx.slots.inject("settings.section", () => ctx.slots.register(definition("settings.section", 20), ModelRotatorCard));
+      ctx.slots.inject("plugins.item", () => ctx.slots.register(definition("plugins.item", 45), ModelRotatorCard));
     }
     //#endregion
 

@@ -1,7 +1,11 @@
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync,existsSync, readdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-const pub = 'D:/DS_harness/插件开发/dsh-model-rotator-publish'
-const dev = 'D:/DS_harness/插件开发/dsh-model-rotator'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+// Self-relative, for the same reason the other suites are: a hardcoded absolute path
+// means a copy of this tree is never actually the thing under test.
+const pub = dirname(fileURLToPath(import.meta.url)).replace(/\\\\/g, '/')
+const dev = pub.replace(/-publish$/, '')
 const read = (f) => readFileSync(pub + '/' + f, 'utf8')
 const manifest = JSON.parse(read('package.json'))
 const index = read('index.js')
@@ -61,6 +65,21 @@ const sums = read('SHA256SUMS.txt').trim().split(/\r?\n/).map(l => l.split(/\s+/
 const { createHash } = await import('node:crypto')
 const sumOk = sums.every(([hash, file]) => createHash('sha256').update(readFileSync(pub + '/' + file)).digest('hex') === hash)
 ck('16 SHA256SUMS matches the shipped bytes', sumOk, sums.length + ' entries')
+
+// 7. the schema loader must capability-test the chain, not just presence of object().
+// The anchors are scanned in profile-name order and a stale schemastery on this machine
+// (user-home node_modules) has no volatile(), so a presence-only check selected it and
+// Config then threw at load time. This asserts the probe is the capability form.
+const loaderSrc = read('index.js')
+const probesVolatile = /loaded\.boolean\(\)\.default\(true\)\.volatile\(\)/.test(loaderSrc)
+const hasWeakOnlyCheck = /return loaded !== null\s*\r?\n\s*&& \(typeof loaded === 'object' \|\| typeof loaded === 'function'\)\s*\r?\n\s*&& typeof loaded\.object === 'function'/.test(loaderSrc)
+ck('17 the schema loader capability-tests volatile()', probesVolatile && !hasWeakOnlyCheck, 'probe=' + probesVolatile + ' weakOnly=' + hasWeakOnlyCheck)
+
+// 8. no test may import the plugin through a hardcoded absolute path: an earlier suite
+// pointed at the DEV tree, so the published bytes were never actually covered here.
+const PATH_SIG = new RegExp(['D', ':/DS_', 'harness|', '插件', '开发'].join(''))
+const hardcoded = readdirSync(pub).filter(f => /^(test.*|release-check)\.mjs$/.test(f)).filter(f => PATH_SIG.test(read(f)))
+ck('18 no test hardcodes a machine-local plugin path', hardcoded.length === 0, hardcoded.join(',') || 'none')
 
 let failed = 0
 for (const [st, label, extra] of results) { if (st === 'FAIL') failed += 1; console.log(st.padEnd(5), label, extra === '' ? '' : '[' + extra + ']') }

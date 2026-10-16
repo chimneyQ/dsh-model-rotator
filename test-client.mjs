@@ -15,12 +15,15 @@
  */
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { join, dirname } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const profile = 'C:/Users/lenovo/.dsh/profiles/desktop'
 const z = createRequire(join(profile, 'package.json'))('@deepseek-ai/schemastery')
-const pluginDir = 'D:/DS_harness/插件开发/dsh-model-rotator'
+// Self-relative: a hardcoded absolute path made this suite test the DEV tree
+// instead of the tree it ships from, so the published bytes were never covered.
+// dirname(fileURLToPath(import.meta.url)) is the directory this file lives in.
+const pluginDir = dirname(fileURLToPath(import.meta.url)).replace(/\\\\/g, '/')
 const results = []
 const check = (label, cond, extra = '') => results.push([cond ? 'PASS' : 'FAIL', label, extra])
 
@@ -145,7 +148,15 @@ const ctx = {
   },
   configForms: {
     get: (ns) => { usedNamespace = ns; return scope },
-    whileServed: (namespaces, fn) => { servedNamespaces = namespaces; return fn() },
+    // Faithful gate: this Host serves NOTHING, so a gated registration would never
+    // run. That is the deployment shape the gate used to hide the page in - silently,
+    // with no error and zero cells. The page must register anyway and let the Host's
+    // SettingsForm show its own "unavailable" line.
+    whileServed: (namespaces, fn) => {
+      const served = new Set([])
+      if (namespaces.some(n => served.has(n))) fn(served)
+      return () => {}
+    },
   },
   slots: {
     inject: (name, fn) => fn(),
@@ -154,7 +165,8 @@ const ctx = {
 }
 mod.apply(ctx)
 check('2a the settings namespace is the plugin id', usedNamespace === 'model-rotator', String(usedNamespace))
-check('2b the card is registered only while the host serves the namespace', JSON.stringify(servedNamespaces) === JSON.stringify(['model-rotator']), JSON.stringify(servedNamespaces))
+check('2b the card registers even while the host serves no namespace', registered.length === 2, String(registered.length))
+check('2b2 no registration is wrapped in a served-namespace gate', !/whileServed\s*\(/.test(source.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')), 'gate call present in code')
 check('2c the form occupies the Settings nav cell and the Plugins card cell', registered.length === 2 && registered.map(r => r.definition.name).sort().join(',') === 'plugins.item,settings.section' && registered.every(r => r.definition.id === 'model-rotator'), JSON.stringify(registered.map(r => r.definition.name + '#' + r.definition.id)))
 check('2d each cell carries a label, an order and the dictionary namespace', registered.every(r => typeof r.definition.label() === 'string' && r.definition.locale === mod.NS && Number.isFinite(r.definition.order)), JSON.stringify(registered.map(r => r.definition.order)))
 check('2e both dictionaries are registered', Array.isArray(dictionaries[mod.NS]?.zh) === false && dictionaries[mod.NS]?.zh !== undefined && dictionaries[mod.NS]?.en !== undefined, Object.keys(dictionaries).join(','))
@@ -162,6 +174,15 @@ check('2e both dictionaries are registered', Array.isArray(dictionaries[mod.NS]?
 // ---- 3. rendering: every page field has a control, and only those -----------
 // Both cells render the same component, so the form face is asserted once.
 const settingsCell = registered.find(r => r.definition.name === 'settings.section')
+// A missing settings cell must be REPORTED, not thrown: a crash here would suppress
+// every result collected so far, hiding the assertion that actually failed (2b).
+if (settingsCell === undefined) {
+  check('2f the settings page is a Navigation cell of its own', false, 'no settings.section cell registered')
+  console.log(results.map(([s, l, e]) => `${s}  ${l}${e ? '   [' + e + ']' : ''}`).join('\n'))
+  console.log('')
+  console.log('FAILED: registration contract broken - cannot continue to the render checks')
+  process.exit(1)
+}
 check('2f the settings page is a Navigation cell of its own', settingsCell !== undefined && settingsCell.definition.order !== registered.find(r => r.definition.name === 'plugins.item').definition.order, String(settingsCell?.definition.order))
 const face = settingsCell.definition.inject()
 const t = (key) => key
