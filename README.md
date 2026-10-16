@@ -444,6 +444,14 @@ the session), `failure verdict` and `switch order`.
 
 ## Install
 
+From npm (recommended):
+
+```
+dsh plugin --profile desktop add dsh-model-rotator
+```
+
+From GitHub:
+
 ```
 dsh plugin --profile desktop add github:chimneyQ/dsh-model-rotator
 ```

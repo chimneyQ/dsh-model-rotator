@@ -253,6 +253,14 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
 
 ## 安装
 
+从 npm 安装（推荐）：
+
+```bash
+dsh plugin --profile desktop add dsh-model-rotator
+```
+
+从 GitHub 安装：
+
 ```bash
 dsh plugin --profile desktop add github:chimneyQ/dsh-model-rotator
 ```
