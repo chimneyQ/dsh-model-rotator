@@ -261,7 +261,7 @@ check('4h every provider line folds', /group\.key \+ "\/" \+ channel\.provider/.
 // the real hooks runtime: a filter that renders but never narrows the rows is
 // worse than no filter, because it says it did something.
 check('4m the search box is rendered with its own state', /const \[query, setQuery\] = React\.useState/.test(source) && /type: "search"/.test(source), '')
-check('4n the query filters rows on "provider/model"', /const matches = \(row\) =>/.test(source) && /\.toLowerCase\(\)\.includes\(needle\)/.test(source), '')
+check('4n the query filters rows on "provider/model", token by token', /const matches = \(row\) =>/.test(source) && /split\(\/\\s\+\/\).*filter\(Boolean\)/.test(source) && /for \(const token of tokens\) if \(!hay\.includes\(token\)\) return false/.test(source), '')
 check('4o a match forces the folds open', /const searching = query\.trim\(\) !== ""/.test(source) && /const shown = searching \|\| folded/.test(source), '')
 check('4p a channel with no match is dropped', /const matched = group\.channels\.filter/.test(source), '')
 check('4q the hit counter and empty state are wired', /models\.searchHits/.test(source) && /models\.searchNone/.test(source), '')
@@ -542,6 +542,23 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     box.props.onChange({ target: { value: 'beta' } })
     fnodes = await settle()
     check('5v2 a partially matching channel renders only the matching rows', rowCountAt(fnodes) === 1, 'rows=' + rowCountAt(fnodes))
+
+    // Two words are two tokens, not one substring: "provA gamma" must match the row
+    // whose provider and model are exactly those, and must NOT match on the joined
+    // string alone. Before this the box matched the query whole, so a space anywhere
+    // matched nothing at all.
+    box.props.onChange({ target: { value: 'provB gamma' } })
+    fnodes = await settle()
+    check('5v3 a multi-word query requires every token', rowCountAt(fnodes) === 1 && typedModelNames(fnodes).some((n) => /gamma/.test(n)), 'rows=' + rowCountAt(fnodes) + ' ' + JSON.stringify(typedModelNames(fnodes).slice(0, 4)))
+    box.props.onChange({ target: { value: 'provB alpha' } })
+    fnodes = await settle()
+    check('5v4 a multi-word query with one unmatched token matches nothing', rowCountAt(fnodes) === 0, 'rows=' + rowCountAt(fnodes))
+    box.props.onChange({ target: { value: '  gamma  ' } })
+    fnodes = await settle()
+    check('5v5 surrounding whitespace does not change the result', rowCountAt(fnodes) === 1, 'rows=' + rowCountAt(fnodes))
+    box.props.onChange({ target: { value: 'GAMMA provB' } })
+    fnodes = await settle()
+    check('5v6 token order does not matter and case is folded', rowCountAt(fnodes) === 1, 'rows=' + rowCountAt(fnodes))
 
     // Now the same query with the flat roster removed: the counter must fall back to
     // walking the sections, or it reports "no match" while matching rows are shown.

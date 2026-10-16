@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
       "models.channelOff": "全部关闭",
       "models.expandAll": "全部展开",
       "models.collapseAll": "全部收起",
-      "models.search": "搜索模型…",
+      "models.search": "搜索模型…（空格分隔多个关键词，需全部命中）",
       "models.searchClear": "清除",
       "models.searchHits": "命中 {n} / {total} 个模型",
       "models.searchNone": "没有匹配的模型",
@@ -166,7 +166,7 @@ window.__ModuleLoader__.load({
       "models.channelOff": "all off",
       "models.expandAll": "Expand all",
       "models.collapseAll": "Collapse all",
-      "models.search": "Search models…",
+      "models.search": "Search models… (space-separated terms must all match)",
       "models.searchClear": "Clear",
       "models.searchHits": "{n} of {total} models match",
       "models.searchNone": "No model matches",
@@ -383,9 +383,16 @@ window.__ModuleLoader__.load({
        * the rows all call it during the same render pass.
        */
       const matches = (row) => {
-        const needle = query.trim().toLowerCase();
-        if (needle === "") return true;
-        return (String(row.provider) + "/" + String(row.model)).toLowerCase().includes(needle);
+        // Split on whitespace and require EVERY token, rather than matching the whole
+        // box as one substring. A reader types "deepseek flash", not
+        // "deepseek-v4-flash": as a single substring the first form matches nothing
+        // while the second matches only the rows that happen to be hyphenated that
+        // way. Per-token AND is what the half-remembered name actually needs.
+        const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        if (tokens.length === 0) return true;
+        const hay = (String(row.provider) + "/" + String(row.model)).toLowerCase();
+        for (const token of tokens) if (!hay.includes(token)) return false;
+        return true;
       };
       // True whenever the box holds something. Declared with the state, before
       // anything that reads it: the box renders before the payload is inspected,
