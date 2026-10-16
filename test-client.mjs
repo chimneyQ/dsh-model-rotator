@@ -253,7 +253,26 @@ check('4g the vision section starts folded', /vision: true/.test(source), '')
 check('4l the switch notice is on the page', /"noticeSwitch"/.test(source) && /field: "noticeSwitch"/.test(source), '')
 // Each provider line folds on its own too, and the every-channel buttons write
 // the same map - one key shape answers for both layers.
-check('4h every provider line folds', /group\.key \+ "\/" \+ channel\.provider/.test(source) && /channelOpen = folded\[channelKey\]/.test(source), '')
+check('4h every provider line folds', /group\.key \+ "\/" \+ channel\.provider/.test(source) && /channelOpen = (?:searching \|\| )?folded\[channelKey\]/.test(source), '')
+
+// ---- 4m-4q. the model search box -------------------------------------------
+// The roster is ~900 rows, so a reader hunting one name needs a filter. These
+// assert the wiring (a source regex) and, further down, the behaviour against
+// the real hooks runtime: a filter that renders but never narrows the rows is
+// worse than no filter, because it says it did something.
+check('4m the search box is rendered with its own state', /const \[query, setQuery\] = React\.useState/.test(source) && /type: "search"/.test(source), '')
+check('4n the query filters rows on "provider/model"', /const matches = \(row\) =>/.test(source) && /\.toLowerCase\(\)\.includes\(needle\)/.test(source), '')
+check('4o a match forces the folds open', /const searching = query\.trim\(\) !== ""/.test(source) && /const shown = searching \|\| folded/.test(source), '')
+check('4p a channel with no match is dropped', /const matched = group\.channels\.filter/.test(source), '')
+check('4q the hit counter and empty state are wired', /models\.searchHits/.test(source) && /models\.searchNone/.test(source), '')
+check('4r every search key is present in both dictionaries', (() => {
+  const keys = ['models.search', 'models.searchClear', 'models.searchHits', 'models.searchNone']
+  return keys.every((k) => {
+    const zh = new RegExp('"' + k + '":').test(source)
+    const enBlock = source.slice(source.indexOf('const en = {'))
+    return zh && new RegExp('"' + k + '":').test(enBlock)
+  })
+})(), '')
 check('4i a folded channel still reports its tally', /models\.counts/.test(source) && /tallyOf/.test(source), '')
 // The host and this bundle are versioned together but not *loaded* together, so a
 // stale host must not leave the roster blank.
@@ -310,7 +329,15 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     at: 0,
     total: 4,
     inRotation: 3,
-    models: [],
+    // The host sends the flat roster alongside the grouped view; the counter reads
+    // it. Left empty here it exercised the section-walk fallback instead, so both
+    // shapes are covered: this one is filled, and 5v2 below empties it again.
+    models: [
+      { key: 'provA/alpha', provider: 'provA', model: 'alpha', health: 'cooling', inRotation: true, switchable: true },
+      { key: 'provA/beta', provider: 'provA', model: 'beta', health: 'ok', inRotation: true, switchable: true },
+      { key: 'provB/gamma', provider: 'provB', model: 'gamma', health: 'ok', inRotation: true, switchable: true },
+      { key: 'provA-vision/alpha', provider: 'provA-vision', model: 'alpha', health: 'off', inRotation: false, switchable: true },
+    ],
     groups: [
       { key: 'chat', models: 3, channels: [
         { provider: 'provA', channel: 'provA', kind: 'chat', sourceChannel: '', ok: 1, off: 0, resting: 1, models: [
@@ -459,6 +486,93 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   check('5p a closed channel offers to reopen', reopen !== undefined, btns(nodes).filter((n) => /本渠道/.test(textOf(n))).map(textOf).join(' | '))
   if (reopen !== undefined) { click(reopen); await settle() }
   check('5o reopening a channel posts enabled=true', postBodies.some((b) => b.scope === 'provider' && b.enabled === true), JSON.stringify(postBodies.slice(-2)))
+
+  // ---- 5r-5z. the search box narrows the roster (real typing, real re-render) --
+  // A filter is only worth having if the rows actually change. This types into the
+  // box and re-renders, so a box that renders but does not filter fails here.
+  const findInput = (nodes) => nodes.find((n) => n.type === 'input' && n.props && n.props.type === 'search')
+  // A model-name cell is the monospace span inside a row (see modelNameStyle);
+  // selecting on that is what keeps this from also collecting the section titles.
+  const typedModelNames = (nodes) => nodes
+    .filter((n) => n.type === 'span' && n.props && n.props.style && n.props.style.fontFamily === 'monospace')
+    .map((n) => textOf(n))
+  // Reset the channel switch so the payload is the open, unfiltered roster again.
+  delete payload.groups[0].channels[0].switchedOff
+  let fnodes = await settle()
+
+  const box = findInput(fnodes)
+  check('5r the roster renders a search input', box !== undefined, fnodes.filter((n) => n.type === 'input').length + ' input(s)')
+  check('5s the box is empty by default and the full roster shows', box !== undefined && box.props.value === '', box ? JSON.stringify(box.props.value) : 'no box')
+
+  // The unfiltered baseline the filtered count is compared against.
+  const rowCountAt = (nodes) => nodes.filter((n) => n.type === 'div' && n.props && n.props.style && n.props.style.display === 'flex' && n.props.style.borderTop !== undefined && n.props.style.gap === '10px').length
+  const fullRowCount = rowCountAt(fnodes)
+
+  if (box !== undefined) {
+    // Type "gamma": only provB/gamma may survive.
+    box.props.onChange({ target: { value: 'gamma' } })
+    fnodes = await settle()
+    const names = typedModelNames(fnodes)
+    // A row is the monospace name span; counting them is what makes this fail when
+    // the filter is bypassed. The unfiltered roster rendered 4 rows, so a passing
+    // filter must render exactly 1 here.
+    // A model row is the flex div the ModelList builds per row (modelRowStyle).
+    // Counting those is what notices a bypassed filter; counting spans also caught
+    // the channel tally, which is monospace too.
+    const rowCount = (nodes) => nodes.filter((n) => n.type === 'div' && n.props && n.props.style && n.props.style.display === 'flex' && n.props.style.borderTop !== undefined && n.props.style.gap === '10px').length
+    check('5t a query hides rows that do not match', names.some((n) => /gamma/.test(n)) && !names.some((n) => /beta/.test(n)) && rowCountAt(fnodes) === 1 && fullRowCount > 1, 'rows=' + rowCountAt(fnodes) + '/' + fullRowCount + ' ' + JSON.stringify(names.slice(0, 6)))
+    // The section must still be visible so the hit is reachable even though chat
+    // starts open and vision starts folded - the filter opens them.
+    const chatHead = byLabel(fnodes, /对话渠道|chat/i)
+    check('5u a matching section stays on screen', chatHead !== undefined, fnodes.filter((n) => n.type === 'button').length + ' buttons')
+    // The hit counter must say 1 of N.
+    // The dictionary line is "命中 {n} / {total} 个模型"; only provB/gamma matches.
+    // The line is "命中 {n} / {total} 个模型". n must be the narrowed count (1),
+    // and total must be the payload's 4 - a total of 0 was a real bug (the counter
+    // read a binding that had not been assigned yet on first paint).
+    const counter = fnodes.map(textOf).find((x) => /命中\s*1\s*\/\s*4/.test(x))
+    check('5v the hit counter reports the narrowed count', counter !== undefined, JSON.stringify(fnodes.map(textOf).filter((x) => /命中|match/.test(x)).slice(0, 2)))
+    // A query matching nothing must say so rather than render an empty list.
+    box.props.onChange({ target: { value: 'zzz-no-such-model-9f3a' } })
+    fnodes = await settle()
+    check('5w a query with no match reports it', fnodes.some((n) => /没有匹配|No model/.test(textOf(n))), fnodes.map(textOf).filter((x) => /匹配|match/.test(x)).join(' | '))
+    // A channel that partially matches proves the row filter is doing work: provA
+    // owns alpha AND beta, so searching "beta" must leave one row in that channel,
+    // not two. Coverage here is what the channel-level drop cannot mask.
+    box.props.onChange({ target: { value: 'beta' } })
+    fnodes = await settle()
+    check('5v2 a partially matching channel renders only the matching rows', rowCountAt(fnodes) === 1, 'rows=' + rowCountAt(fnodes))
+
+    // Now the same query with the flat roster removed: the counter must fall back to
+    // walking the sections, or it reports "no match" while matching rows are shown.
+    const savedModels = payload.models
+    payload.models = []
+    box.props.onChange({ target: { value: 'gamma' } })
+    fnodes = await settle()
+    check('5w2 the counter falls back when the host sends no flat roster', fnodes.map(textOf).some((x) => /命中\s*1\s*\/\s*4/.test(x)), JSON.stringify(fnodes.map(textOf).filter((x) => /命中|match|匹配/.test(x)).slice(0, 2)))
+    payload.models = savedModels
+    box.props.onChange({ target: { value: 'zzz-no-such-model-9f3a' } })
+    fnodes = await settle()
+    // Clearing the box brings the whole roster back.
+    box.props.onChange({ target: { value: '' } })
+    fnodes = await settle()
+    const backNames = typedModelNames(fnodes)
+    check('5x clearing the query restores every row', backNames.some((n) => /gamma/.test(n)) && backNames.some((n) => /beta/.test(n)) && backNames.some((n) => /alpha/.test(n)), JSON.stringify(backNames.slice(0, 6)))
+    // Match is case-insensitive.
+    box.props.onChange({ target: { value: 'GAMMA' } })
+    fnodes = await settle()
+    check('5y the match is case-insensitive', typedModelNames(fnodes).some((n) => /gamma/.test(n)), JSON.stringify(typedModelNames(fnodes).slice(0, 4)))
+    // And the clear button exists once something is typed.
+    box.props.onChange({ target: { value: 'gamma' } })
+    fnodes = await settle()
+    const clearBtn = fnodes.find((n) => n.type === 'button' && /清除|Clear/.test(textOf(n)))
+    check('5z a typed query offers a clear button', clearBtn !== undefined, '')
+    if (clearBtn !== undefined) {
+      clearBtn.props.onClick()
+      fnodes = await settle()
+      check('5z2 the clear button empties the box', findInput(fnodes).props.value === '', JSON.stringify(findInput(fnodes).props.value))
+    }
+  }
   delete globalThis.fetch
 }
 

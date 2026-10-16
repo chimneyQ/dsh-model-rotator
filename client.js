@@ -74,6 +74,10 @@ window.__ModuleLoader__.load({
       "models.channelOff": "全部关闭",
       "models.expandAll": "全部展开",
       "models.collapseAll": "全部收起",
+      "models.search": "搜索模型…",
+      "models.searchClear": "清除",
+      "models.searchHits": "命中 {n} / {total} 个模型",
+      "models.searchNone": "没有匹配的模型",
       "models.visionBadge": "识图",
       "models.reason.channel": "整个渠道已关闭",
       "models.disableChannel": "关闭本渠道",
@@ -162,6 +166,10 @@ window.__ModuleLoader__.load({
       "models.channelOff": "all off",
       "models.expandAll": "Expand all",
       "models.collapseAll": "Collapse all",
+      "models.search": "Search models…",
+      "models.searchClear": "Clear",
+      "models.searchHits": "{n} of {total} models match",
+      "models.searchNone": "No model matches",
       "models.visionBadge": "vision",
       "models.reason.channel": "the whole channel is switched off",
       "models.disableChannel": "Disable channel",
@@ -297,6 +305,12 @@ window.__ModuleLoader__.load({
     };
 
     const listStyle = { marginTop: "20px", borderTop: "1px solid rgba(128,128,128,0.25)", paddingTop: "14px" };
+    /** The search box: full width, inherits the form's type styling. */
+    const searchInputStyle = {
+      flex: "1 1 auto", minWidth: "0", padding: "5px 8px", fontSize: "13px",
+      border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px",
+      background: "transparent", color: "inherit"
+    };
     const listHeadStyle = { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "12px" };
     const listTitleStyle = { fontSize: "13px", fontWeight: 600 };
     const listHintStyle = { fontSize: "12px", opacity: 0.7, margin: "4px 0 10px", maxWidth: "46em" };
@@ -354,6 +368,60 @@ window.__ModuleLoader__.load({
       // which is the shape that makes ~900 rows readable at all. Every provider
       // line folds on its own from there.
       const [folded, setFolded] = React.useState({ chat: false, vision: true });
+      // The roster is ~900 rows, so a reader hunting one model name otherwise has
+      // to scroll every channel. The query filters by substring over
+      // "provider/model" (case-insensitive); an empty query is the unfiltered view.
+      const [query, setQuery] = React.useState("");
+      /**
+       * Whether a row survives the current query.
+       *
+       * Matching is a case-insensitive substring over "provider/model" rather than
+       * a token list: the roster is read by a human looking for one name they
+       * half-remember, and "" always matches, so an empty box is the full list.
+       *
+       * Declared with the state, above every reader: the header, the counter and
+       * the rows all call it during the same render pass.
+       */
+      const matches = (row) => {
+        const needle = query.trim().toLowerCase();
+        if (needle === "") return true;
+        return (String(row.provider) + "/" + String(row.model)).toLowerCase().includes(needle);
+      };
+      // True whenever the box holds something. Declared with the state, before
+      // anything that reads it: the box renders before the payload is inspected,
+      // so a declaration further down would be a temporal-dead-zone read.
+      const searching = query.trim() !== "";
+      // How many models match, for the line under the box. Read straight off the
+      // payload rather than the later `data` binding: the header renders before
+      // that binding exists, and reaching for it here was a temporal-dead-zone
+      // read that crashed the whole page on first paint.
+      /**
+       * How many models match, for the line under the box.
+       *
+       * Computed where it is read rather than declared once: on the first paint the
+       * payload has not arrived yet (the effect fills it a tick later), so a value
+       * captured at declaration time stayed 0 and the counter reported "no match"
+       * while the matching rows were plainly on screen.
+       */
+      const matchedCount = () => {
+        if (!searching) return 0;
+        const payload = state.data;
+        if (payload === null || payload === undefined) return 0;
+        // Prefer the flat roster. Fall back to walking the sections when the host
+        // sent none: `models` is the newer field, and a host that omits it would
+        // otherwise make the counter claim "no match" while the rows were on screen.
+        if (Array.isArray(payload.models) && payload.models.length > 0) {
+          return payload.models.filter(matches).length;
+        }
+        const sections = Array.isArray(payload.groups) ? payload.groups : [];
+        let n = 0;
+        for (const group of sections) {
+          for (const channel of group.channels || []) {
+            for (const row of channel.models || []) if (matches(row)) n += 1;
+          }
+        }
+        return n;
+      };
       const flip = (key) => setFolded((prev) => Object.assign({}, prev, { [key]: !prev[key] }));
       /**
        * Collapse or expand every section and channel at once.
@@ -460,7 +528,47 @@ window.__ModuleLoader__.load({
           })
         ]
       }));
-      children.push(jsx("div", { key: "hint", style: listHintStyle, children: t("models.hint") }));
+      // The box. Kept outside the settings form for the same reason the roster is:
+      // it is a view control over a live roster, not a value the page stages and
+      // saves, and typing in it must never look like an unsaved edit.
+      children.push(jsxs("div", {
+        key: "search",
+        style: { display: "flex", alignItems: "center", gap: "8px", margin: "10px 0 6px" },
+        children: [
+          jsx("input", {
+            key: "box",
+            type: "search",
+            value: query,
+            placeholder: t("models.search"),
+            "aria-label": t("models.search"),
+            onChange: (event) => setQuery(event && event.target ? event.target.value : ""),
+            style: searchInputStyle
+          }),
+          searching
+            ? jsx("button", {
+                key: "clear",
+                type: "button",
+                style: smallButtonStyle,
+                onClick: () => setQuery(""),
+                children: t("models.searchClear")
+              })
+            : null
+        ].filter((child) => child !== null)
+      }));
+      if (searching) {
+        children.push(jsx("div", {
+          key: "hits",
+          style: { fontSize: "12px", opacity: 0.75, marginBottom: "6px" },
+          children: matchedCount() === 0
+            ? t("models.searchNone")
+            : fill(t("models.searchHits"), {
+                n: matchedCount(),
+                total: state.data === null || state.data === undefined ? 0 : state.data.total
+              })
+        }));
+      } else {
+        children.push(jsx("div", { key: "hint", style: listHintStyle, children: t("models.hint") }));
+      }
 
       /**
        * Health tally for one channel or one section, counted from its own rows.
@@ -485,6 +593,14 @@ window.__ModuleLoader__.load({
         }
         return { total: total, ok: ok, resting: resting, off: off };
       };
+
+      /**
+       * The rows a channel would render under the current query, and the two
+       * counters the folded line needs so a collapsed channel never hides whether
+       * the match is inside it.
+       */
+      const visibleModels = (channel) => channel.models.filter(matches);
+
 
       /** One collapsible line: chevron, name, counts. */
       const disclosure = (key, label, meta, hint) => jsxs("button", {
@@ -567,22 +683,30 @@ window.__ModuleLoader__.load({
           // Recorded for the expand/collapse-all buttons: they must cover exactly
           // the rows this render produced, whatever shape the payload had.
           for (const channel of group.channels) channelIds.push(group.key + "/" + channel.provider);
-          const shown = folded[group.key] !== true;
+          // A query narrows the section to the channels that still have a match,
+          // and counts the matches rather than every row the channel owns - a
+          // folded line that reported the unfiltered tally would contradict the
+          // rows below it.
+          const matched = group.channels.filter((channel) => visibleModels(channel).length > 0);
+          if (matched.length === 0) continue;
+          // Searching should reveal, not hide: a hit inside a folded channel would
+          // otherwise be invisible, which is exactly what the box was opened to fix.
+          const shown = searching || folded[group.key] !== true;
           children.push(disclosure(
             group.key,
             t("models.group." + group.key),
-            fill(t("models.counts"), Object.assign({ n: group.models }, tallyOf(group.channels)))
+            fill(t("models.counts"), Object.assign({ n: tallyOf(matched).total }, tallyOf(matched)))
           ));
           if (!shown) continue;
           children.push(jsx("div", { key: group.key + "#hint", style: groupHintStyle, children: t("models.groupHint." + group.key) }));
           const wrap = [];
-          for (const channel of group.channels) {
+          for (const channel of matched) {
             const channelKey = group.key + "/" + channel.provider;
-            const channelOpen = folded[channelKey] !== true;
+            const channelOpen = searching || folded[channelKey] !== true;
             // The tally is the point of a folded line: "18 models, all usable" or
             // "18 models, 2 cooling" answers the question the fold is hiding, so
             // collapsing never costs the reader the state.
-            const tally = fill(t("models.counts"), Object.assign({ n: channel.models.length }, tallyOf([channel])));
+            const tally = fill(t("models.counts"), Object.assign({ n: visibleModels(channel).length }, tallyOf([channel])));
             // The channel's own switch. Its label follows the channel rather than
             // the individual rows, so a half-closed channel still offers the one
             // action that finishes the job: close the rest.
@@ -642,7 +766,7 @@ window.__ModuleLoader__.load({
             });
             const rows = [head];
             if (channelOpen) {
-              for (const row of channel.models) rows.push(modelRow(row));
+              for (const row of visibleModels(channel)) rows.push(modelRow(row));
             }
             wrap.push(jsx("div", { key: channelKey, style: channelStyle, children: rows }));
           }
