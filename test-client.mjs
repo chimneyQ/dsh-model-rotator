@@ -261,7 +261,8 @@ check('4h every provider line folds', /group\.key \+ "\/" \+ channel\.provider/.
 // the real hooks runtime: a filter that renders but never narrows the rows is
 // worse than no filter, because it says it did something.
 check('4m the search box is rendered with its own state', /const \[query, setQuery\] = React\.useState/.test(source) && /type: "search"/.test(source), '')
-check('4n the query ranks rows on "provider/model", token by token', /const rankOf = \(row\) =>/.test(source) && /split\(\/\\s\+\/\)\.map\(normSearch\)/.test(source) && /const tier = tierOf\(hay, token\)/.test(source), '')
+check('4n the query ranks rows on "provider/model", token by token', /const rankOf = \(row\) =>/.test(source) && /split\(\/\\s\+\/\)\.map\(normSearch\)/.test(source) && /const tier = token\.length === 1 && !solo/.test(source), '')
+check('4n5 a lone character is word-anchored inside a multi-term query', /const solo = tokens\.length === 1/.test(source) && /const startsWord = \(raw, token\) =>/.test(source), '')
 check('4n2 matching is normalised before comparing', /const normSearch = \(value\) =>/.test(source) && /replace\(SEPARATORS, ""\)/.test(source), '')
 check('4n3 a subsequence fallback exists and is length-guarded', /const isSubsequence = \(s, q\) =>/.test(source) && /token\.length >= 2 && isSubsequence/.test(source), '')
 check('4n4 a weaker token sorts the row lower, and matches rank above fallbacks', /weakest/.test(source) && /b\.rank - a\.rank/.test(source), '')
@@ -601,6 +602,30 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     box.props.onChange({ target: { value: 'qqqq' } })
     fnodes = await settle()
     check('5w5 a query with no match at any tier reports nothing', rowCountAt(fnodes) === 0, 'rows=' + rowCountAt(fnodes))
+
+    // A one-character term inside a multi-word query must be word-anchored, or the
+    // AND is fiction: measured on the live roster, 25 of 36 characters match more
+    // than 200 of 950 names, so "a b" still returned 264 rows before this rule.
+    // provC has "ds-flash" (a word starting with d) and "deepseek-flash" (no word
+    // starts with d), so a query of "z d" separates them.
+    // "a a" is the probe that actually separates the two rules in this fixture.
+    // "a" is a plain substring of five names (alpha, beta, gamma, deepseek-flash,
+    // ds-flash) and a word start in exactly one (alpha), so a substring rule answers
+    // with five rows and word-anchoring with one. An earlier "zzz d" probe did NOT
+    // separate them - d is both a substring and a word start in the same rows - and
+    // it passed against the broken build.
+    box.props.onChange({ target: { value: 'a a' } })
+    fnodes = await settle()
+    // Two rows, not one: the fixture carries an alpha in BOTH sections (provA/alpha
+    // and the vision twin provA-vision/alpha), and a query forces the vision section
+    // open. Both are alpha, which is the point - a substring rule would also drag in
+    // beta, gamma and the two flash names through a bare "a".
+    const alphaRows = typedModelNames(fnodes).filter((n) => /alpha/.test(n))
+    check('5w6 a one-character term inside a multi-word query is word-anchored', rowCountAt(fnodes) === 2 && alphaRows.length === 2, 'rows=' + rowCountAt(fnodes) + ' ' + JSON.stringify(typedModelNames(fnodes).slice(0, 6)))
+    // And a lone one-character query still behaves as a plain substring search.
+    box.props.onChange({ target: { value: 'g' } })
+    fnodes = await settle()
+    check('5w7 a lone character is still a plain substring search', typedModelNames(fnodes).some((n) => /gamma/.test(n)), JSON.stringify(typedModelNames(fnodes).slice(0, 3)))
     box.props.onChange({ target: { value: '' } })
     fnodes = await settle()
 

@@ -403,6 +403,18 @@ window.__ModuleLoader__.load({
       const SEPARATORS = /[-_./\s]+/g;
       const normSearch = (value) => String(value || "").toLowerCase().replace(SEPARATORS, "");
 
+      /**
+       * Whether a one-character token starts a word.
+       *
+       * Normalisation strips the very separators a word boundary is made of, so this
+       * reads the RAW name: "ds-flash" contributes the words ds and flash, so "f"
+       * starts a word there, while the "f" inside "flash" does not.
+       */
+      const startsWord = (raw, token) => String(raw)
+        .toLowerCase()
+        .split(/[-_./\s]+/)
+        .some((word) => word.length > 0 && word[0] === token);
+
       /** Every character of q appears in s, in order (not necessarily adjacent). */
       const isSubsequence = (s, q) => {
         let at = 0;
@@ -438,10 +450,20 @@ window.__ModuleLoader__.load({
           ? []
           : query.trim().split(/\s+/).map(normSearch).filter((t) => t !== "");
         if (tokens.length === 0) return query.trim() === "" ? 1 : 0;
-        const hay = normSearch(String(row.provider) + "/" + String(row.model));
+        const raw = String(row.provider) + "/" + String(row.model);
+        const hay = normSearch(raw);
         let weakest = 2;
         for (const token of tokens) {
-          const tier = tierOf(hay, token);
+          // A one-character token is only useful on its own. Measured on the live
+          // roster, 25 of 36 characters match more than 200 of 950 names ("o"
+          // matches 892), so as one term of a multi-term query it constrains
+          // nothing - "a b" still returned 264 rows. Narrow it to a word boundary,
+          // which is what a reader typing "ds f" or "q4 3" actually means, and keep
+          // the loose form only when the single letter IS the whole query.
+          const solo = tokens.length === 1;
+          const tier = token.length === 1 && !solo
+            ? (startsWord(raw, token) ? 2 : 0)
+            : tierOf(hay, token);
           if (tier === 0) return 0;
           if (tier < weakest) weakest = tier;
         }
