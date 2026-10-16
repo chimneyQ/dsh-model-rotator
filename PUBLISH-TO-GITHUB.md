@@ -141,4 +141,10 @@ A: 在 DSH 里执行：
 dsh plugin --profile desktop add D:\DS_harness\插件开发\dsh-model-rotator-publish
 ```
 
-装完需要**完全重启** DeepSeek Harness，然后打开 设置 → 模型自动切换。
+装完是否要重启，取决于这次安装改了哪个文件（实测边界，别凭印象）：
+
+- 只写 `cordis.patch.yml`（插件市场/UI 装插件走的 patch 层）⇒ 约 5-10 秒**热生效**，客户端半体页面刷新即可；
+- 改了 profile 的 `package.json` 或 `dsh.profile.bundles`（`dsh plugin add` 走的路径）⇒ 这两个文件不在 hmr 的监听列表里（它只 watch 两个 patch 文件），需要重载 profile（重启 DSH）；
+- 改已装插件 `node_modules` 里的源码 ⇒ 同样不热（hmr 的 ignored 覆盖 `**/node_modules`）。
+
+装完打开 设置 → 模型自动切换。
