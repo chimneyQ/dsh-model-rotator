@@ -261,7 +261,10 @@ check('4h every provider line folds', /group\.key \+ "\/" \+ channel\.provider/.
 // the real hooks runtime: a filter that renders but never narrows the rows is
 // worse than no filter, because it says it did something.
 check('4m the search box is rendered with its own state', /const \[query, setQuery\] = React\.useState/.test(source) && /type: "search"/.test(source), '')
-check('4n the query filters rows on "provider/model", token by token', /const matches = \(row\) =>/.test(source) && /split\(\/\\s\+\/\).*filter\(Boolean\)/.test(source) && /for \(const token of tokens\) if \(!hay\.includes\(token\)\) return false/.test(source), '')
+check('4n the query ranks rows on "provider/model", token by token', /const rankOf = \(row\) =>/.test(source) && /split\(\/\\s\+\/\)\.map\(normSearch\)/.test(source) && /const tier = tierOf\(hay, token\)/.test(source), '')
+check('4n2 matching is normalised before comparing', /const normSearch = \(value\) =>/.test(source) && /replace\(SEPARATORS, ""\)/.test(source), '')
+check('4n3 a subsequence fallback exists and is length-guarded', /const isSubsequence = \(s, q\) =>/.test(source) && /token\.length >= 2 && isSubsequence/.test(source), '')
+check('4n4 a weaker token sorts the row lower, and matches rank above fallbacks', /weakest/.test(source) && /b\.rank - a\.rank/.test(source), '')
 check('4o a match forces the folds open', /const searching = query\.trim\(\) !== ""/.test(source) && /const shown = searching \|\| folded/.test(source), '')
 check('4p a channel with no match is dropped', /const matched = group\.channels\.filter/.test(source), '')
 check('4q the hit counter and empty state are wired', /models\.searchHits/.test(source) && /models\.searchNone/.test(source), '')
@@ -337,6 +340,11 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
       { key: 'provA/beta', provider: 'provA', model: 'beta', health: 'ok', inRotation: true, switchable: true },
       { key: 'provB/gamma', provider: 'provB', model: 'gamma', health: 'ok', inRotation: true, switchable: true },
       { key: 'provA-vision/alpha', provider: 'provA-vision', model: 'alpha', health: 'off', inRotation: false, switchable: true },
+      // A pair that separates the two tiers: "deepseek-flash" matches the token
+      // "dsflash" only as a subsequence, while "ds-flash" matches it normalised.
+      { key: 'provC/deepseek-flash', provider: 'provC', model: 'deepseek-flash', health: 'ok', inRotation: true, switchable: true },
+      { key: 'provC/ds-flash', provider: 'provC', model: 'ds-flash', health: 'ok', inRotation: true, switchable: true },
+      { key: 'provC/zzz-none', provider: 'provC', model: 'zzz-none', health: 'ok', inRotation: true, switchable: true },
     ],
     groups: [
       { key: 'chat', models: 3, channels: [
@@ -346,6 +354,11 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
         ] },
         { provider: 'provB', channel: 'provB', kind: 'chat', sourceChannel: '', ok: 1, off: 0, resting: 0, models: [
           { key: 'provB/gamma', provider: 'provB', model: 'gamma', health: 'ok', rest: 0, reason: '', lastErrorKind: '', attempts: 0, successes: 0, failures: 0, ttftMs: null, lastError: '', manual: '', inRotation: true, switchable: true },
+        ] },
+        { provider: 'provC', channel: 'provC', kind: 'chat', sourceChannel: '', ok: 3, off: 0, resting: 0, models: [
+          { key: 'provC/deepseek-flash', provider: 'provC', model: 'deepseek-flash', health: 'ok', rest: 0, reason: '', lastErrorKind: '', attempts: 1, successes: 1, failures: 0, ttftMs: 100, lastError: '', manual: '', inRotation: true, switchable: true },
+          { key: 'provC/ds-flash', provider: 'provC', model: 'ds-flash', health: 'ok', rest: 0, reason: '', lastErrorKind: '', attempts: 1, successes: 1, failures: 0, ttftMs: 100, lastError: '', manual: '', inRotation: true, switchable: true },
+          { key: 'provC/zzz-none', provider: 'provC', model: 'zzz-none', health: 'ok', rest: 0, reason: '', lastErrorKind: '', attempts: 1, successes: 1, failures: 0, ttftMs: 100, lastError: '', manual: '', inRotation: true, switchable: true },
         ] },
       ] },
       { key: 'vision', models: 1, channels: [
@@ -464,7 +477,7 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   // One per *chat* channel on screen. A vision channel carries none: its rows are
   // all kept out by the twin rule, which the channel flag cannot lift, so a button
   // there would write an entry that changes nothing while reading like a promise.
-  check('5k one switch per chat channel, labelled by its own state', allChannelSwitches.length === 2 && disableChannel.length === 2, 'all=' + allChannelSwitches.length + ' close=' + disableChannel.length)
+  check('5k one switch per chat channel, labelled by its own state', allChannelSwitches.length === 3 && disableChannel.length === 3, 'all=' + allChannelSwitches.length + ' close=' + disableChannel.length)
   const visionLine = btns(nodes).find((n) => /provA-vision/.test(textOf(n)) && /个/.test(textOf(n)))
   check('5r a vision channel offers no channel switch', visionLine !== undefined && !/本渠道/.test(textOf(visionLine)), visionLine === undefined ? '' : textOf(visionLine))
   click(disableChannel[0])
@@ -559,6 +572,37 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     box.props.onChange({ target: { value: 'GAMMA provB' } })
     fnodes = await settle()
     check('5v6 token order does not matter and case is folded', rowCountAt(fnodes) === 1, 'rows=' + rowCountAt(fnodes))
+
+    // ---- 5w1-5w5. normalisation, tiering and the guarded fallback --------------
+    // "dsflash" has no separator-free substring of "deepseek-flash"? It does after
+    // normalisation: deepseekflash contains dsflash. Both provC rows match, and the
+    // normalised one must sort first.
+    box.props.onChange({ target: { value: 'dsflash' } })
+    fnodes = await settle()
+    const dsRows = typedModelNames(fnodes).filter((n) => /flash/.test(n) && !/gamma|beta|alpha/.test(n))
+    check('5w1 a separator-free query reaches a hyphenated name', dsRows.length >= 2, JSON.stringify(dsRows.slice(0, 4)))
+    check('5w2 the precise match outranks the fallback', dsRows[0] === 'ds-flash', JSON.stringify(dsRows.slice(0, 4)))
+
+    // The subsequence fallback still reaches a row no substring would: after
+    // normalisation "provcdeepseekflash" holds d..p..k in order, so "dpk" - a
+    // genuine abbreviation - matches a name that contains "dpk" nowhere.
+    box.props.onChange({ target: { value: 'dpk' } })
+    fnodes = await settle()
+    check('5w3 the fallback reaches a row no substring matches', typedModelNames(fnodes).some((n) => /deepseek-flash/.test(n)), JSON.stringify(typedModelNames(fnodes).slice(0, 4)))
+
+    // A one-character query must NOT use the fallback: it would match the roster at
+    // random. "q" is a subsequence of several fixture names and a substring of
+    // none, so substring-only leaves the list empty - which is the assertion.
+    box.props.onChange({ target: { value: 'q' } })
+    fnodes = await settle()
+    check('5w4 a single character does not trigger the fallback', rowCountAt(fnodes) === 0, 'rows=' + rowCountAt(fnodes))
+
+    // And an unmatched query still matches nothing.
+    box.props.onChange({ target: { value: 'qqqq' } })
+    fnodes = await settle()
+    check('5w5 a query with no match at any tier reports nothing', rowCountAt(fnodes) === 0, 'rows=' + rowCountAt(fnodes))
+    box.props.onChange({ target: { value: '' } })
+    fnodes = await settle()
 
     // Now the same query with the flat roster removed: the counter must fall back to
     // walking the sections, or it reports "no match" while matching rows are shown.

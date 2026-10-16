@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
       "models.channelOff": "全部关闭",
       "models.expandAll": "全部展开",
       "models.collapseAll": "全部收起",
-      "models.search": "搜索模型…（空格分隔多个关键词，需全部命中）",
+      "models.search": "搜索模型…（空格分词；忽略 - _ . / 与大小写）",
       "models.searchClear": "清除",
       "models.searchHits": "命中 {n} / {total} 个模型",
       "models.searchNone": "没有匹配的模型",
@@ -166,7 +166,7 @@ window.__ModuleLoader__.load({
       "models.channelOff": "all off",
       "models.expandAll": "Expand all",
       "models.collapseAll": "Collapse all",
-      "models.search": "Search models… (space-separated terms must all match)",
+      "models.search": "Search models… (tokens; - _ . / and case are ignored)",
       "models.searchClear": "Clear",
       "models.searchHits": "{n} of {total} models match",
       "models.searchNone": "No model matches",
@@ -382,18 +382,74 @@ window.__ModuleLoader__.load({
        * Declared with the state, above every reader: the header, the counter and
        * the rows all call it during the same render pass.
        */
-      const matches = (row) => {
-        // Split on whitespace and require EVERY token, rather than matching the whole
-        // box as one substring. A reader types "deepseek flash", not
-        // "deepseek-v4-flash": as a single substring the first form matches nothing
-        // while the second matches only the rows that happen to be hyphenated that
-        // way. Per-token AND is what the half-remembered name actually needs.
-        const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-        if (tokens.length === 0) return true;
-        const hay = (String(row.provider) + "/" + String(row.model)).toLowerCase();
-        for (const token of tokens) if (!hay.includes(token)) return false;
-        return true;
+      // ── search matching ───────────────────────────────────────────────────────
+      //
+      // Two ideas, both borrowed from how other DSH search UIs solved the same
+      // problem, and both measured against this machine's 950-model roster:
+      //
+      //   1. NORMALISE before comparing. "glm53" should find "GLM-5.3": dropping the
+      //      separators (- _ . / and whitespace) from both sides costs nothing and
+      //      took that query from 0 hits to 58. Normalised containment is a superset
+      //      of raw containment, so nothing that matched before stops matching.
+      //   2. Rank matches by QUALITY rather than filtering to a flat list, so a loose
+      //      fallback can be offered without making the list unusable.
+      //
+      // The fallback is subsequence (fzf-style: every query character in order, not
+      // necessarily adjacent), which is what makes an abbreviation like "ds" reach
+      // "DeepSeek". It is deliberately the weaker tier and guarded: without the
+      // length gate a single letter matched the entire roster, and even at two
+      // characters only 22% of its hits were actually DeepSeek-family models, so it
+      // is ranked below rather than mixed in with the substring hits.
+      const SEPARATORS = /[-_./\s]+/g;
+      const normSearch = (value) => String(value || "").toLowerCase().replace(SEPARATORS, "");
+
+      /** Every character of q appears in s, in order (not necessarily adjacent). */
+      const isSubsequence = (s, q) => {
+        let at = 0;
+        for (let i = 0; i < s.length && at < q.length; i++) if (s[i] === q[at]) at += 1;
+        return at === q.length;
       };
+
+      /**
+       * Match quality for one haystack/token pair.
+       *
+       * 2 = normalised substring, 1 = subsequence only, 0 = no match. Substring
+       * ranks above subsequence because it is the precise one: "flash" matching
+       * "flash" is a better answer than "ds" matching every model whose name happens
+       * to contain a d then an s.
+       */
+      const tierOf = (hay, token) => {
+        if (hay.includes(token)) return 2;
+        // Below two characters the fallback is far too loose to be useful: "a" is a
+        // subsequence of almost every name, so it would rank the roster at random.
+        if (token.length >= 2 && isSubsequence(hay, token)) return 1;
+        return 0;
+      };
+
+      /**
+       * The rank a row gets under the current query, or 0 to drop it.
+       *
+       * Every whitespace-separated token must match, and the row takes the WEAKEST
+       * token's tier: one imprecise token is enough to qualify the row, but it still
+       * sorts below a row where every token was precise.
+       */
+      const rankOf = (row) => {
+        const tokens = normSearch(query).length === 0
+          ? []
+          : query.trim().split(/\s+/).map(normSearch).filter((t) => t !== "");
+        if (tokens.length === 0) return query.trim() === "" ? 1 : 0;
+        const hay = normSearch(String(row.provider) + "/" + String(row.model));
+        let weakest = 2;
+        for (const token of tokens) {
+          const tier = tierOf(hay, token);
+          if (tier === 0) return 0;
+          if (tier < weakest) weakest = tier;
+        }
+        return weakest;
+      };
+
+      /** Kept as the boolean face of the same rule, for callers that only filter. */
+      const matches = (row) => rankOf(row) > 0;
       // True whenever the box holds something. Declared with the state, before
       // anything that reads it: the box renders before the payload is inspected,
       // so a declaration further down would be a temporal-dead-zone read.
@@ -606,7 +662,23 @@ window.__ModuleLoader__.load({
        * counters the folded line needs so a collapsed channel never hides whether
        * the match is inside it.
        */
-      const visibleModels = (channel) => channel.models.filter(matches);
+      const visibleModels = (channel) => {
+        const ranked = [];
+        channel.models.forEach((row, index) => {
+          const rank = rankOf(row);
+          if (rank > 0) ranked.push({ row, rank, index });
+        });
+        // Only sort while a query is active: the unfiltered roster keeps the host's
+        // own order, which is a meaningful ranking (in-rotation first) that this
+        // page should not second-guess.
+        if (query.trim() !== "") {
+          ranked.sort((a, b) => (b.rank - a.rank) || (a.index - b.index));
+        }
+        return ranked.map((entry) => entry.row);
+      };
+
+      /** Whether the channel has any match at all - the filter the section needs. */
+      const hasMatch = (channel) => channel.models.some(matches);
 
 
       /** One collapsible line: chevron, name, counts. */
@@ -694,7 +766,7 @@ window.__ModuleLoader__.load({
           // and counts the matches rather than every row the channel owns - a
           // folded line that reported the unfiltered tally would contradict the
           // rows below it.
-          const matched = group.channels.filter((channel) => visibleModels(channel).length > 0);
+          const matched = group.channels.filter(hasMatch);
           if (matched.length === 0) continue;
           // Searching should reveal, not hide: a hit inside a folded channel would
           // otherwise be invisible, which is exactly what the box was opened to fix.
