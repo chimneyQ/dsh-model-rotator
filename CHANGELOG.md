@@ -7,7 +7,7 @@ User-visible changes, newest first. Commit hashes in brackets.
 ## 0.2.8
 - **Fixed: the switch notice named the wrong reason.** The line says "A → B", so the reason has to be why A went away — but it was read from the last failure the *walk* saw, which by then belongs to whichever candidate failed just before the winner. With one dead model those are the same string; with two they are not, and a balance wall on the starting model was announced as "(network)" because the channel tried after it had a socket reset. The reason now comes from the starting model's own failure. Observed live on 2026-10-18: 魔塔 was out of balance, nvidia answered, and the notice blamed the network.
 - The fallback to the last failure is kept for the case where the starting model never reported one (a host refusal, an aborted turn), so the notice stays populated.
-- 169 offline assertions; the negative control reverts to the old source and fails exactly this assertion, reproducing the "(network)" wording.
+- 169 offline assertions; the negative control reverts to the old source and fails exactly this assertion, reproducing the "(network)" wording. [`79a8d5a`]
 
 ## 0.2.7
 - **Fixed: a compaction that ran out of quota ended the whole turn.** The compaction summary is the first call a long conversation makes, so when the current model's balance was gone it was the first thing to fail — and it was on the do-not-fail-over list, which meant the refusal was passed straight through and the turn died before the answer existed. Compaction now walks the candidate list like any other dead route: the summary is written by the next model and the turn continues. A session title still stays on the model that was asked, because a caption nobody waits on is not worth a second provider.
