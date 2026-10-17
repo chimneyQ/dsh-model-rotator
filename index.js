@@ -393,6 +393,16 @@ export function isNonChatModelId(provider, id) {
 const HARD_MAX_CANDIDATES = 8
 
 /**
+ * How many channels of one model family may share the candidate walk.
+ *
+ * One per family was too few - a channel failing while its healthy siblings were
+ * unreachable is exactly the report this constant answers - and all of them is
+ * too many, because five channels of one model would spend the entire budget on
+ * a single model. Two keeps the representative and one proven-healthy backup.
+ */
+const FAMILY_CHANNELS_MAX = 2
+
+/**
  * Hard ceiling on same-model retries per candidate, regardless of config.
  *
  * A retry of the model that just failed costs the provider another dispatch, so
@@ -1509,19 +1519,35 @@ export function apply(ctx, config = {}, runtime = {}) {
     }
     ranked.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 
-    // One candidate per model *family*, not one per channel. The same model on
-    // five channels shares its fate - one quota wall, one dead endpoint - so
-    // keeping all five in the walk spends the whole candidate budget retrying
-    // what is effectively one model, and the switch notice then reads as
-    // "switched to the same model again". The best-scoring channel of each
-    // family survives; its siblings wait for another turn (no cooldown is
-    // written for them, so a later walk can still pick them).
-    const familySeen = new Set()
+    // A model family contributes more than one channel - but not all of them.
+    //
+    // The same model on five channels used to occupy five candidate slots, which
+    // spent the whole budget retrying what is effectively one model. Collapsing it
+    // to exactly one channel fixed that and introduced a worse failure: a channel is
+    // not the whole family. WorkBuddy met its quota wall while buddy and trae, the
+    // same model on other channels, were healthy and serving - and the walk could
+    // not reach them, because the family had already been represented by the channel
+    // that failed. The turn ended on the wall with a working route sitting one slot
+    // away.
+    //
+    // So a family keeps up to FAMILY_CHANNELS_MAX channels, ranked, and a sibling is
+    // only kept while it is actually usable. Cooling siblings are dropped: they would
+    // be dispatched into the same wall the representative just hit, and the walk
+    // already knows better. The switch-notice dedup keys on the model id, so arriving
+    // at a second channel of the same model does not announce "switched to the same
+    // model again" - the reason that motivated one-per-family in the first place is
+    // handled where it belongs.
+    const familyCount = new Map()
     const byFamily = []
     for (const row of ranked) {
       const family = String(row.pair.model).toLowerCase()
-      if (familySeen.has(family)) continue
-      familySeen.add(family)
+      const used = familyCount.get(family) ?? 0
+      if (used >= FAMILY_CHANNELS_MAX) continue
+      const stat = statFor(row.key)
+      // The family's first channel is always kept - it is the ranked winner and the
+      // representation of that model. Only the siblings have to prove they are usable.
+      if (used > 0 && stat.cooldownUntil > nowMs) continue
+      familyCount.set(family, used + 1)
       byFamily.push(row)
     }
     const ordered = [current, ...byFamily.map(row => row.pair)]

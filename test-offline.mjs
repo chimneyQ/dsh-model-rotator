@@ -1312,6 +1312,36 @@ const quietHandle = (value) => ({
   }
 }
 
+// ---- a failing channel does not strand healthy siblings of the same model ----
+{
+  // The real report: WorkBuddy hit its quota wall while buddy and trae - the same
+  // model on other channels - were healthy and serving. Collapsing each family to
+  // exactly one channel left them unreachable and the turn ended on the wall.
+  //
+  // The fixture has to fail twice before the healthy channel, or the walk stops on
+  // the first success and the family cap never shows its effect: with one-per-family
+  // the second sibling is not in the walk at all, so the turn dies on the second
+  // failure; with two it reaches the third channel and the turn succeeds.
+  const h = makeCtx((options) => (options.provider === 'provC'
+    ? [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'ok from ' + options.provider },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    : [{ type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted 可用账号均受限' } } }]))
+  h.ctx.llm.listProviders = () => [{ id: 'provA' }, { id: 'provB' }, { id: 'provC' }]
+  h.ctx.llm.registration = () => ({ adapter: { listModels: async q => ({ provA: [{ id: 'twin' }], provB: [{ id: 'twin' }], provC: [{ id: 'twin' }] })[q] ?? [] } })
+  apply(h.ctx, { confirmSwitch: false, adoptSwitchedModel: false }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'twin', messages: [] }))
+  const final = chunks.filter(c => c.type === 'finish').pop()
+  const text = chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  // Three channels of one model: current + two siblings. Both siblings must be in
+  // the walk for the healthy third channel to be reachable after two failures.
+  check('a healthy sibling channel of the same model is still reachable',
+    text.includes('ok from provC') && final?.reason?.kind === 'stop',
+    'text=' + JSON.stringify(text) + ' finish=' + JSON.stringify(final?.reason) + ' attempted=' + [...new Set(h.attempted)].join(','))
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))
