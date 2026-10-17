@@ -6,7 +6,7 @@ User-visible changes, newest first. Commit hashes in brackets.
 
 ## 0.2.6
 - **Fixed: other channels of the same model were deduplicated out of the walk.** This is the real problem 0.2.5 uncovered once the classification was right: when WorkBuddy met its quota wall, **buddy and trae — the same model on other channels — were healthy**, but "one channel per model family" kept them out of the candidate list entirely, so the turn ended on the quota error with a working route sitting one slot away. A family now keeps up to **two channels**: the ranked winner plus one proven-usable backup. A cooling backup is dropped, since dispatching it would walk into the same wall. The switch notice is already deduplicated by model id, so arriving at a second channel of the same model is not announced as "switched to the same model again".
-- Measured: before the fix the walk held one channel of `deepseek-v4.1-flash` and `buddy` (ok=1538, healthy) was absent; after it holds three and `buddy` is back. [`TBD`]
+- Measured: before the fix the walk held one channel of `deepseek-v4.1-flash` and `buddy` (ok=1538, healthy) was absent; after it holds three and `buddy` is back. [`fed9508`]
 
 ## 0.2.5
 - **Fixed: an exhausted quota read as a rate limit, so the switch never happened.** WorkBuddy answers "可用账号均在限流中，最近一个将于 … 解禁" — every account exhausted. Classified as `rate-limit` it cooled for 60 seconds and retried the same wall; one evening accumulated 702 failures. An account pool that is entirely unavailable is now recognised as `quota` and rests like any other balance wall.
