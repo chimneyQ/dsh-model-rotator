@@ -1005,6 +1005,31 @@ const quietHandle = (value) => ({
     const steer4 = []
     quiet.turnStopping({ agent: { session: { header: {} }, steer: (m) => steer4.push(m) }, turn: 1, signal: { aborted: false } })
     check('18o noticeSwitch false silences it', steer4.length === 0, 'steered=' + steer4.length)
+
+    // The reason in the notice belongs to the model named as "from", so it must
+    // come from that model's own failure - not from whichever candidate failed
+    // immediately before the winner. With two dead candidates those differ: the
+    // starting model was out of balance, the one after it had a socket reset, and
+    // reading lastFailure reported "(network)" for a balance wall. This is the
+    // exact shape that produced a real notice on 2026-10-18.
+    // The fixture has two providers and three models: alpha fails on balance,
+    // beta (the next channel of the same provider) fails on a socket, gamma
+    // answers. Two different dead reasons, so the notice has to pick one.
+    const chain = makeCtx((options) => {
+      if (options.model === 'alpha') return [{ type: 'finish', reason: { kind: 'error', failure: { message: '429: {"message":"insufficient balance"}' } } }]
+      if (options.model === 'beta') return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'fetch failed: ECONNRESET' } } }]
+      return [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]
+    })
+    const chainTurn = []
+    const innerOn3 = chain.ctx.on
+    chain.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') chain.turnStopping = fn; return innerOn3(event, fn) }
+    apply(chain.ctx, { retriesPerModel: 0, maxCandidates: 8, confirmSwitch: false }, {})
+    await collect(chain.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    chain.turnStopping({ agent: { session: { header: {} }, steer: (m) => chainTurn.push(m) }, turn: 1, signal: { aborted: false } })
+    const chainText = chainTurn.length === 1 ? chainTurn[0].content[0].text : ''
+    check('18p the notice blames the origin model, not the last failure',
+      /(quota)/.test(chainText) && !/\(network\)/.test(chainText),
+      'notice=' + JSON.stringify(chainText) + ' attempted=' + chain.attempted.join(','))
   } finally {
     if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
     else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg

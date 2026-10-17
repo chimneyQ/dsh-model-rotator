@@ -1764,6 +1764,19 @@ export function apply(ctx, config = {}, runtime = {}) {
 
     let lastFailure = null
     /**
+     * Why the model the turn *started* on failed.
+     *
+     * The switch notice names "A → B", and the reader's question is why A went
+     * away. lastFailure answers a different question - why the *walk* gave up -
+     * and by the time a candidate answers, it holds the reason of whichever
+     * candidate failed immediately before it. With one dead model that is the
+     * same string; with two it is not, and the notice then blames the wrong
+     * route: an exhausted balance on the starting model was reported as
+     * "(network)" because the model tried after it had a socket reset. Recorded
+     * once, from the first candidate only, so the notice keeps its meaning.
+     */
+    let startFailure = null
+    /**
      * The provider's own error finish, held while a retry or a later candidate
      * could still answer. When the whole walk ends with nothing to show, this is
      * what the caller gets: the provider's words, not a paraphrase of them.
@@ -1949,7 +1962,11 @@ export function apply(ctx, config = {}, runtime = {}) {
                   displayName: displayNameOf(String(options.provider ?? '')),
                 },
                 to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
-                reason: classifyFailureKind(String(lastFailure ?? '')),
+                // The reason belongs to "from", so it comes from the starting
+                // model's own failure. Falling back to lastFailure keeps the
+                // notice populated when the starting model never reported one
+                // (a host refusal, an aborted turn).
+                reason: classifyFailureKind(String(startFailure ?? lastFailure ?? '')),
               })
               // The switch itself is the event worth persisting. Without this the
               // counters above were written but the *decision* was not, so a restart
@@ -1990,6 +2007,12 @@ export function apply(ctx, config = {}, runtime = {}) {
           stat.failures += 1
           stat.lastError = failedBecause
           stat.lastErrorKind = failedKind
+          // The first candidate is the model the turn started on - the one the
+          // switch notice names as "from". Its own failure is the reason the
+          // reader is owed; later candidates only explain why the walk kept
+          // going. Only the first is kept, so a retry of the same model does not
+          // overwrite a more specific earlier verdict with a transient one.
+          if (index === 0 && startFailure === null) startFailure = failedBecause
         }
 
         if (failureYielded !== null) {
