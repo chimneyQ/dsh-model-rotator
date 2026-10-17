@@ -76,12 +76,19 @@ function makeCtx(behaviour, seams, opts) {
       effect: f => f(),
     })
   }
-  /** Call the mounted route the way the host would. */
-  const request = async (method, body) => {
-    const entry = routes[0]
+  /**
+   * Call a mounted route the way the host would.
+   *
+   * `url` carries the query string (the switch log takes ?session=) and `at`
+   * picks which registered route to call - the models list is mounted first, the
+   * switch log second.
+   */
+  const request = async (method, body, url, at = 0) => {
+    const entry = routes[at]
     if (entry === undefined) throw new Error('no route was mounted')
     const req = {
       method,
+      url,
       async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body), 'utf8') },
     }
     let status = 0
@@ -288,8 +295,12 @@ const seamsFor = (opts = {}) => {
   }
   return { asks, adoptions, seams }
 }
+// The failure that *starts* a switch is a transient one on purpose: a quota
+// wall or an unsupported request is a deterministic dead end, and those now
+// switch without asking (see DEAD_END_KINDS). Using one here would make every
+// consent-gate assertion below pass for the wrong reason.
 const failsThenSucceeds = options => (options.model === 'alpha'
-  ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted' } } }]
+  ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'fetch failed: ECONNRESET' } } }]
   : [
       { type: 'block-start', index: 0, blockType: 'text' },
       { type: 'text-delta', index: 0, text: 'hello from ' + options.model },
@@ -329,7 +340,7 @@ const switchRun = async (behaviour, config, seams) => {
   const { h, chunks } = await switchRun(failsThenSucceeds, {}, seams)
   const fins = chunks.filter(c => c.type === 'finish')
   check('9g a declined switch never dials another model', h.attempted.every(k => k === 'provA/alpha'), 'attempted=' + h.attempted.join(','))
-  check('9h the decline ends the turn on an honest error', fins.length === 1 && /switch declined after quota exhausted/.test(String(fins[0]?.reason?.failure?.message)), JSON.stringify(fins[fins.length - 1]))
+  check('9h the decline ends the turn on an honest error', fins.length === 1 && /switch declined after fetch failed: ECONNRESET/.test(String(fins[0]?.reason?.failure?.message)), JSON.stringify(fins[fins.length - 1]))
 }
 {
   const { seams } = seamsFor({ selected: [], custom: '不切换' })
@@ -357,10 +368,47 @@ const switchRun = async (behaviour, config, seams) => {
 }
 {
   const { asks, seams } = seamsFor({ selected: ['切换'] })
-  const { h, chunks } = await switchRun(allFail, {}, seams)
+  // Transient, not quota: a dead end would now skip the question entirely and
+  // this assertion would have nothing to count.
+  const allFailTransient = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: 'fetch failed: ECONNRESET' } } }]
+  const { h, chunks } = await switchRun(allFailTransient, {}, seams)
   const fins = chunks.filter(c => c.type === 'finish')
   check('9n one approval covers the whole walk', asks.length === 1 && h.attempted.length >= 2, 'asks=' + asks.length + ' attempted=' + h.attempted.join(','))
-  check('9o a walk that still fails reports the provider error, not the decline', fins.length === 1 && /quota exhausted/.test(String(fins[0]?.reason?.failure?.message)) && !/declined/.test(String(fins[0]?.reason?.failure?.message)), JSON.stringify(fins[fins.length - 1]))
+  check('9o a walk that still fails reports the provider error, not the decline', fins.length === 1 && /ECONNRESET/.test(String(fins[0]?.reason?.failure?.message)) && !/declined/.test(String(fins[0]?.reason?.failure?.message)), JSON.stringify(fins[fins.length - 1]))
+}
+{
+  // A deterministic dead end is not a preference the reader can exercise: the
+  // balance is gone for the day and the provider's "unsupported" answers the
+  // same way next time. Declining could not keep the model, so the question only
+  // cost a modal and the wait - the switch now happens on its own, and the
+  // record still says why.
+  const deadEnds = [
+    ['quota', '429: {"message":"insufficient balance"}'],
+    ['unsupported', 'this model does not support reasoning effort on'],
+  ]
+  for (const [kind, message] of deadEnds) {
+    const { asks, seams } = seamsFor({ selected: ['保持当前模型'] })
+    const h = makeCtx(options => (options.model === 'alpha'
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message } } }]
+      : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]), seams)
+    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+    const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    check('9p a ' + kind + ' dead end switches without asking',
+      asks.length === 0 && switched(chunks),
+      'kind=' + kind + ' asks=' + asks.length + ' attempted=' + h.attempted.join(','))
+  }
+
+  // The deliberate exception. A 403 is often a burst-rate proxy that clears, so
+  // "keep my model and let me retry" is a real choice there, and the question
+  // stays. This is also the negative control for 9p: if the gate had been
+  // removed outright, nothing would ask here either.
+  const { asks: authAsks, seams: authSeams } = seamsFor({ selected: ['切换'] })
+  const auth = makeCtx(options => (options.model === 'alpha'
+    ? [{ type: 'finish', reason: { kind: 'error', failure: { message: '403 forbidden: invalid api key' } } }]
+    : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]), authSeams)
+  apply(auth.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(auth.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('9q an auth failure still asks (a burst-rate proxy does recover)', authAsks.length === 1, 'asks=' + authAsks.length)
 }
 
 // ---- scenario 10: the swapped model becomes the model of the session ---------
@@ -673,7 +721,11 @@ const switchRun = async (behaviour, config, seams) => {
   try {
     const h = makeCtx(() => [], undefined, { route: true })
     apply(h.ctx, {}, {})
-    check('14a the list route is mounted when a web server exists', h.routes.length === 1 && h.routes[0].path === '/_dsh/model-rotator/models', JSON.stringify(h.routes.map(r => r.path)))
+    check('14a both routes are mounted when a web server exists',
+      h.routes.length === 2
+        && h.routes[0].path === '/_dsh/model-rotator/models'
+        && h.routes[1].path === '/_dsh/model-rotator/switches',
+      JSON.stringify(h.routes.map(r => r.path)))
 
     const get = await h.request('GET')
     check('14b the list groups every model by channel', get.status === 200 && get.payload.channels.length === 2 && get.payload.total === 3, 'channels=' + get.payload.channels.length + ' total=' + get.payload.total)
@@ -754,6 +806,9 @@ const switchRun = async (behaviour, config, seams) => {
 {
   const auto = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: '422: dsh native compaction call refused by billion-context' } } }]
   const quota = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: 'insufficient balance' } } }]
+  // A transient failure: it must keep asking, so a fixture built on it isolates
+  // the *purpose* exclusion (15e/15f) from the dead-end exclusion (9p-9r).
+  const transient = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: 'fetch failed: ECONNRESET' } } }]
 
   const title = makeCtx(auto)
   apply(title.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
@@ -797,7 +852,7 @@ const switchRun = async (behaviour, config, seams) => {
   // The consent question must not park a summary nobody is reading. Asked with
   // the default config (confirmSwitch on) and a seam that would record it.
   const { asks, adoptions, seams } = seamsFor({ selected: ['切换'] })
-  const asked = makeCtx((options) => (options.model === 'alpha' ? quota() : [
+  const asked = makeCtx((options) => (options.model === 'alpha' ? transient() : [
     { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', index: 0, text: 'summary' },
     { type: 'finish', reason: { kind: 'stop' } },
@@ -811,7 +866,7 @@ const switchRun = async (behaviour, config, seams) => {
   // Negative control: the same fixture with an ordinary turn *does* ask and
   // *does* adopt, so 15e/15f are not passing because the seams never fire.
   const { asks: turnAsks, adoptions: turnAdoptions, seams: turnSeams } = seamsFor({ selected: ['切换'] })
-  const turn2 = makeCtx((options) => (options.model === 'alpha' ? quota() : [
+  const turn2 = makeCtx((options) => (options.model === 'alpha' ? transient() : [
     { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', index: 0, text: 'answer' },
     { type: 'finish', reason: { kind: 'stop' } },
@@ -968,7 +1023,9 @@ const quietHandle = (value) => ({
     const onEvents = []
     const innerOn = h.ctx.on
     h.ctx.on = (event, fn) => { onEvents.push(event); if (event === 'agent/turn-stopping') h.turnStopping = fn; return innerOn(event, fn) }
-    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6, confirmSwitch: false }, {})
+    // The row is opt-in since 0.2.9; these assertions are about the row itself,
+    // so they ask for it explicitly instead of leaning on the default.
+    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6, confirmSwitch: false, noticeSwitch: true }, {})
     check('18i the notice listens at the turn boundary', onEvents.includes('agent/turn-stopping'), onEvents.join(','))
     await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
     const agent = { session: { header: { parentSession: undefined } }, steer: (m) => steer.push(m) }
@@ -1023,7 +1080,7 @@ const quietHandle = (value) => ({
     const chainTurn = []
     const innerOn3 = chain.ctx.on
     chain.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') chain.turnStopping = fn; return innerOn3(event, fn) }
-    apply(chain.ctx, { retriesPerModel: 0, maxCandidates: 8, confirmSwitch: false }, {})
+    apply(chain.ctx, { retriesPerModel: 0, maxCandidates: 8, confirmSwitch: false, noticeSwitch: true }, {})
     await collect(chain.run({ provider: 'provA', model: 'alpha', messages: [] }))
     chain.turnStopping({ agent: { session: { header: {} }, steer: (m) => chainTurn.push(m) }, turn: 1, signal: { aborted: false } })
     const chainText = chainTurn.length === 1 ? chainTurn[0].content[0].text : ''
@@ -1418,6 +1475,65 @@ const quietHandle = (value) => ({
   check('a healthy sibling channel of the same model is still reachable',
     text.includes('ok from provC') && final?.reason?.kind === 'stop',
     'text=' + JSON.stringify(text) + ' finish=' + JSON.stringify(final?.reason) + ' attempted=' + [...new Set(h.attempted)].join(','))
+}
+
+// ---- scenario 20: the switch log the conversation tab reads -------------------
+// The record used to exist only as a notice row inside the conversation, which
+// spent context on a plumbing fact the reader may not have been looking at. It
+// now lives in the plugin, keyed by the session captured at the turn boundary,
+// and the row is opt-in - so a reader who turned the row off still has history.
+{
+  const { mkdtempSync } = await import('node:fs')
+  const dir = mkdtempSync(join(tmpdir(), 'rotator-switchlog-'))
+  process.env.DSH_MODEL_ROTOR_STATS = join(dir, 's.json')
+  const priorCfg = process.env.DSH_MODEL_ROTOR_CONFIG
+  process.env.DSH_MODEL_ROTOR_CONFIG = join(dir, 'absent.json')
+  try {
+    const quotaThenOk = options => (options.model === 'alpha'
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: '429: {"message":"insufficient balance"}' } } }]
+      : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+    const h = makeCtx(quotaThenOk, undefined, { route: true })
+    const steered = []
+    const innerOn = h.ctx.on
+    h.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') h.turnStopping = fn; return innerOn(event, fn) }
+    apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const empty = await h.request('GET', undefined, '/_dsh/model-rotator/switches', 1)
+    check('20a the log starts empty', empty.status === 200 && empty.payload.entries.length === 0, JSON.stringify(empty.payload).slice(0, 120))
+
+    h.turnStopping({ agent: { session: { id: 'sess-1', header: {} }, steer: m => steered.push(m) }, turn: 1, signal: { aborted: false } })
+    check('20b the in-conversation row is off by default', steered.length === 0, 'steered=' + steered.length)
+
+    const mine = await h.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-1', 1)
+    const row = mine.payload.entries[0]
+    check('20c the switch is recorded against its session',
+      mine.status === 200 && mine.payload.entries.length === 1 && row.session === 'sess-1'
+        && row.reason === 'quota' && row.from.provider === 'provA' && row.to.provider === 'provA',
+      JSON.stringify(mine.payload.entries).slice(0, 200))
+    check('20d the labels are the ones the reader recognises',
+      row.from.label === 'alpha' && row.to.label === 'beta',
+      JSON.stringify([row.from.label, row.to.label]))
+
+    const other = await h.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-2', 1)
+    check('20e another conversation sees nothing', other.payload.entries.length === 0, 'entries=' + other.payload.entries.length)
+    const all = await h.request('GET', undefined, '/_dsh/model-rotator/switches', 1)
+    check('20f asking for every session returns it', all.payload.entries.length === 1 && all.payload.total === 1, JSON.stringify(all.payload).slice(0, 120))
+
+    // Opting back in still steers the row, and the record is unchanged by it.
+    const opt = makeCtx(quotaThenOk, undefined, { route: true })
+    const steered2 = []
+    const innerOn2 = opt.ctx.on
+    opt.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') opt.turnStopping = fn; return innerOn2(event, fn) }
+    apply(opt.ctx, { retriesPerModel: 0, maxCandidates: 6, noticeSwitch: true }, {})
+    await collect(opt.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    opt.turnStopping({ agent: { session: { id: 'sess-1', header: {} }, steer: m => steered2.push(m) }, turn: 1, signal: { aborted: false } })
+    check('20g opting the row back in still posts it',
+      steered2.length === 1 && steered2[0].source.form === 'notice',
+      'steered=' + steered2.length)
+  } finally {
+    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
+    else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg
+  }
 }
 
 const failed = results.filter(r => r[0] === 'FAIL')

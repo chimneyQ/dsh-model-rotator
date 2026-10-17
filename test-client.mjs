@@ -164,10 +164,13 @@ const ctx = {
   },
 }
 mod.apply(ctx)
+// 0.2.9 puts a third cell on this same pass - the conversation.view switch log - so
+// the two *settings* cells are counted apart from it, and asserted on their own.
+const settingsCells = registered.filter(r => r.definition.name === 'settings.section' || r.definition.name === 'plugins.item')
 check('2a the settings namespace is the plugin id', usedNamespace === 'model-rotator', String(usedNamespace))
-check('2b the card registers even while the host serves no namespace', registered.length === 2, String(registered.length))
+check('2b the card registers even while the host serves no namespace', settingsCells.length === 2, String(settingsCells.length))
 check('2b2 no registration is wrapped in a served-namespace gate', !/whileServed\s*\(/.test(source.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')), 'gate call present in code')
-check('2c the form occupies the Settings nav cell and the Plugins card cell', registered.length === 2 && registered.map(r => r.definition.name).sort().join(',') === 'plugins.item,settings.section' && registered.every(r => r.definition.id === 'model-rotator'), JSON.stringify(registered.map(r => r.definition.name + '#' + r.definition.id)))
+check('2c the form occupies the Settings nav cell and the Plugins card cell', settingsCells.length === 2 && settingsCells.map(r => r.definition.name).sort().join(',') === 'plugins.item,settings.section' && settingsCells.every(r => r.definition.id === 'model-rotator'), JSON.stringify(settingsCells.map(r => r.definition.name + '#' + r.definition.id)))
 check('2d each cell carries a label, an order and the dictionary namespace', registered.every(r => typeof r.definition.label() === 'string' && r.definition.locale === mod.NS && Number.isFinite(r.definition.order)), JSON.stringify(registered.map(r => r.definition.order)))
 check('2e both dictionaries are registered', Array.isArray(dictionaries[mod.NS]?.zh) === false && dictionaries[mod.NS]?.zh !== undefined && dictionaries[mod.NS]?.en !== undefined, Object.keys(dictionaries).join(','))
 
@@ -660,6 +663,216 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     }
   }
   delete globalThis.fetch
+}
+
+// ---- 6. the conversation.view tab: this conversation's switch log -------------
+// A tab that fetches, polls and renders cannot be proved by a source regex, so it is
+// driven here instead. The runtime hands back each effect's cleanup, and setInterval
+// is replaced by a counting stub: that is what proves the poll exists, runs at 5s,
+// and is cleared when the tab goes away (a leaked one would outlive the report).
+{
+  const flatten = (node, out) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { for (const child of node) flatten(child, out); return }
+    if (typeof node.type === 'function') { flatten(node.type(node.props || {}), out); return }
+    out.push(node)
+    flatten((node.props || {}).children, out)
+  }
+  const textOf = (node) => {
+    const parts = []
+    const walk = (n) => {
+      if (n === null || n === undefined) return
+      if (typeof n !== 'object') { parts.push(String(n)); return }
+      if (Array.isArray(n)) { for (const c of n) walk(c); return }
+      if (typeof n.type === 'function') { walk(n.type(n.props || {})); return }
+      walk((n.props || {}).children)
+    }
+    walk((node.props || {}).children)
+    return parts.join('')
+  }
+  const rowsOf = (nodes) => nodes.filter((n) => (n.props || {})['data-switch-row'] === true)
+  const emptyOf = (nodes) => nodes.find((n) => (n.props || {})['data-switch-empty'] === true)
+
+  const makeHarness = () => {
+    let store = []
+    let cursor = 0
+    let effects = []
+    let dirty = false
+    const cleanups = []
+    const runtime = {
+      useState(initial) {
+        const i = cursor++
+        if (store[i] === undefined) store[i] = typeof initial === 'function' ? initial() : initial
+        return [store[i], (next) => {
+          const value = typeof next === 'function' ? next(store[i]) : next
+          if (Object.is(value, store[i])) return
+          store[i] = value
+          dirty = true
+        }]
+      },
+      useCallback(fn, deps) {
+        const i = cursor++
+        const prev = store[i]
+        if (prev !== undefined && deps !== undefined && prev.deps !== undefined && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]))) return prev.fn
+        store[i] = { fn, deps }
+        return fn
+      },
+      useMemo(fn, deps) {
+        const i = cursor++
+        const prev = store[i]
+        if (prev !== undefined && deps !== undefined && Array.isArray(prev.deps) && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]))) return prev.value
+        const value = fn()
+        store[i] = { value, deps }
+        return value
+      },
+      useEffect(fn, deps) {
+        const i = cursor++
+        const prev = store[i]
+        if (Array.isArray(prev) && deps !== undefined && deps.length === prev.length && deps.every((d, k) => Object.is(d, prev[k]))) return
+        store[i] = deps === undefined ? [] : deps
+        effects.push(fn)
+      },
+    }
+    const draw = (Component, props) => {
+      cursor = 0
+      effects = []
+      const nodes = []
+      flatten(Component(props), nodes)
+      return { nodes, pending: effects }
+    }
+    const settle = async (Component, props) => {
+      let state = draw(Component, props)
+      for (let round = 0; round < 20; round++) {
+        for (const fn of state.pending) {
+          const cleanup = fn()
+          if (typeof cleanup === 'function') cleanups.push(cleanup)
+        }
+        await new Promise((resolve) => setImmediate(resolve))
+        if (!dirty) break
+        dirty = false
+        state = draw(Component, props)
+      }
+      return state.nodes
+    }
+    return { runtime, settle, dispose: () => { for (const fn of cleanups) fn() } }
+  }
+
+  // One boot per shape of the sessions service: 'absent' (no ctx.get and no
+  // ctx.sessions), 'throwing' (reading ctx.sessions raises, as an unmounted cordis
+  // service does) and 'present' (a snapshot carrying the current id).
+  const boot = (mode) => {
+    const harness = makeHarness()
+    const dictionaries = {}
+    let delivered
+    const win = { __ModuleLoader__: { load: (entry) => { delivered = entry } } }
+    const require_ = (name) => {
+      if (name === 'react') return harness.runtime
+      if (name === 'react/jsx-runtime') { const el = (type, props) => ({ type, props }); return { jsx: el, jsxs: el } }
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return prim
+      throw new Error('client.js required an unexpected module: ' + name)
+    }
+    new Function('window', source)(win)
+    const mod = delivered.factory(require_)
+    const regs = []
+    const ctx = {
+      effect: (fn) => fn(),
+      locale: { bind: (ns) => (k) => (dictionaries[ns] && dictionaries[ns].zh[k]) || k, register: (ns, d) => { dictionaries[ns] = d } },
+      configForms: { get: () => ({ getSnapshot: () => ({ value: {}, base: {}, user: {} }) }) },
+      slots: { inject: (name, fn) => fn(), register: (definition, Component) => regs.push({ definition, Component }) },
+    }
+    if (mode === 'present') ctx.sessions = { list: { getSnapshot: () => ({ current: 'sess-1' }) } }
+    if (mode === 'throwing') Object.defineProperty(ctx, 'sessions', { get() { throw new Error('service sessions is not mounted') } })
+    let thrown = ''
+    try { mod.apply(ctx) } catch (error) { thrown = String(error) }
+    return { harness, dictionaries, mod, regs, thrown }
+  }
+  const tabOf = (booted) => booted.regs.find((r) => r.definition.name === 'conversation.view')
+
+  const sample = {
+    ok: true, generatedAt: 1759000000000, session: 'sess-1', total: 2,
+    entries: [
+      { at: 1759000000000, session: 'sess-1', purpose: '', reason: 'quota',
+        from: { provider: 'provA', model: 'alpha', label: 'alpha (provA)' },
+        to: { provider: 'provB', model: 'beta', label: '' } },
+      { at: 1758999000000, session: 'sess-1', purpose: 'compaction', reason: 'network',
+        from: { provider: 'provB', model: 'beta', label: '' },
+        to: { provider: 'provC', model: 'gamma', label: '' } },
+    ],
+  }
+
+  let urls = []
+  const payloads = []
+  globalThis.fetch = (url) => {
+    urls.push(String(url))
+    const next = payloads.shift()
+    if (next === undefined) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, entries: [], total: 0 }) })
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(next) })
+  }
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  let intervals = 0
+  let intervalMs = 0
+  let cleared = 0
+  globalThis.setInterval = (fn, ms) => { intervals += 1; intervalMs = ms; return 700 + intervals }
+  globalThis.clearInterval = (id) => { cleared += 1 }
+
+  // -- the registration contract ------------------------------------------------
+  const absent = boot('absent')
+  const tab = tabOf(absent)
+  check('6a the switch log registers as its own conversation.view tab', absent.thrown === '' && tab !== undefined && tab.definition.id === 'model-rotator-switches' && tab.definition.order === 79, absent.thrown === '' ? JSON.stringify(absent.regs.map((r) => r.definition.name + '#' + r.definition.id)) : absent.thrown)
+  check('6b the tab is labelled from the dictionary in both languages', tab !== undefined && tab.definition.label() === '模型切换' && absent.dictionaries[absent.mod.NS].en['switches.tab'] === 'Model switches', tab === undefined ? '' : String(tab.definition.label()))
+
+  // -- this conversation's rows -------------------------------------------------
+  urls = []
+  payloads.push(sample)
+  const sampleNodes = await absent.harness.settle(tab.Component, {})
+  const sampleRows = rowsOf(sampleNodes)
+  check('6c the tab renders from → to and the reason', sampleRows.length === 2 && textOf(sampleRows[0]).includes('alpha (provA)') && textOf(sampleRows[0]).includes('→') && textOf(sampleRows[0]).includes('provB/beta') && textOf(sampleRows[0]).includes('额度耗尽'), sampleRows.map(textOf).join(' || '))
+  check('6c2 a compaction-borne switch names the compaction', sampleRows.length === 2 && textOf(sampleRows[1]).includes('网络错误') && textOf(sampleRows[1]).includes('上下文压缩触发'), sampleRows.length === 2 ? textOf(sampleRows[1]) : 'rows=' + sampleRows.length)
+  check('6c3 the tab polls while it is mounted', intervals === 1 && intervalMs === 5000, 'intervals=' + intervals + ' ms=' + intervalMs)
+  absent.harness.dispose()
+  check('6c4 unmounting clears the poll', cleared === 1, 'cleared=' + cleared)
+
+  // -- the empty state ----------------------------------------------------------
+  const blank = boot('absent')
+  const blankTab = tabOf(blank)
+  payloads.push({ ok: true, generatedAt: 1759000001000, session: 'sess-1', total: 0, entries: [] })
+  const blankNodes = await blank.harness.settle(blankTab.Component, {})
+  const emptyNode = emptyOf(blankNodes)
+  check('6d an empty log shows the empty state', emptyNode !== undefined && textOf(emptyNode) === '本对话暂无模型切换', emptyNode === undefined ? 'no empty node' : textOf(emptyNode))
+  blank.harness.dispose()
+
+  // -- the sessions service is not guaranteed -----------------------------------
+  const throwing = boot('throwing')
+  const throwingTab = tabOf(throwing)
+  urls = []
+  payloads.push(sample)
+  const throwingNodes = await throwing.harness.settle(throwingTab.Component, {})
+  check('6e a sessions service that throws does not take the tab down', throwing.thrown === '' && rowsOf(throwingNodes).length === 2, throwing.thrown === '' ? 'rows=' + rowsOf(throwingNodes).length : throwing.thrown)
+  check('6e2 an unknown conversation asks for the unfiltered log', urls.length === 1 && urls[0].endsWith('/_dsh/model-rotator/switches?limit=200'), urls.join(','))
+  throwing.harness.dispose()
+
+  const present = boot('present')
+  const presentTab = tabOf(present)
+  urls = []
+  payloads.push(sample)
+  await present.harness.settle(presentTab.Component, {})
+  check('6f the tab asks the route for this conversation explicitly', urls.length === 1 && urls[0].includes('?limit=200') && urls[0].includes('&session=sess-1'), urls.join(','))
+  present.harness.dispose()
+
+  // -- the copy stays paired ----------------------------------------------------
+  const zh = absent.dictionaries[absent.mod.NS].zh
+  const en = absent.dictionaries[absent.mod.NS].en
+  const switchKeys = ['switches.tab', 'switches.title', 'switches.hint', 'switches.count', 'switches.column.time', 'switches.column.from', 'switches.column.to', 'switches.column.reason', 'switches.empty', 'switches.loading', 'switches.failed', 'switches.allSessions', 'switches.purpose.compaction', 'switches.reason.quota', 'switches.reason.network', 'switches.reason.rateLimit', 'switches.reason.auth', 'switches.reason.server', 'switches.reason.unsupported', 'switches.reason.none']
+  check('6g the switch tab is translated in both languages', switchKeys.every((k) => typeof zh[k] === 'string' && zh[k] !== '' && typeof en[k] === 'string' && en[k] !== ''), switchKeys.filter((k) => zh[k] === undefined || en[k] === undefined || zh[k] === '' || en[k] === '').join(','))
+  check('6g2 the two dictionaries carry the same keys overall', JSON.stringify(Object.keys(zh).sort()) === JSON.stringify(Object.keys(en).sort()), 'zh=' + Object.keys(zh).length + ' en=' + Object.keys(en).length)
+  // The Lead moved the default of noticeSwitch to off in 0.2.9: the record now lives
+  // on this tab, so the switch is an optional extra row rather than the only channel.
+  check('6h the notice switch now points at this tab and reads off by default', zh.noticeSwitch.includes('默认关') && en.noticeSwitch.includes('off by default') && zh.noticeSwitchHint.includes('模型切换') && en.noticeSwitchHint.includes('Model switches'), String(zh.noticeSwitch) + ' | ' + String(en.noticeSwitch))
+
+  delete globalThis.fetch
+  globalThis.setInterval = realSetInterval
+  globalThis.clearInterval = realClearInterval
 }
 
 // ---- report ------------------------------------------------------------------

@@ -4,6 +4,12 @@
 
 User-visible changes, newest first. Commit hashes in brackets.
 
+## 0.2.9
+- **New: a switch is recorded on its own tab instead of being spent on context.** The record used to exist only as a notice row inside the conversation, which cost context for a plumbing fact the reader may not have been looking at — and when the row was turned off there was no record at all. Switches now land on a **Model switches** tab beside 对话 / 轨迹 / 上下文, one row each: when, from which model to which, and why. The tab reads the plugin's own log (`GET /_dsh/model-rotator/switches?session=<id>`), so nothing is added to the conversation. Records are filed per conversation — the host hands no session to a plugin route, so the session is bound at the turn boundary, the one moment that both sees the switch and knows whose it was.
+- **Changed: the in-conversation row is now opt-in** (`noticeSwitch` defaults to **off**). The tab is the record; turning the setting on additionally posts the old line in the transcript.
+- **Fixed: a deterministic dead end no longer asks before switching.** A balance that is gone will not come back inside the 10 s window, and a request the provider refuses as unsupported is refused identically on the next dispatch — declining there could not have kept the model, so the question only cost a card and a wait. `quota` and `unsupported` now switch on their own. **Auth deliberately still asks**: a 403 is often a burst-rate proxy that clears, so keeping the model is a real choice there.
+- 179 offline assertions. The dead-end rule has its own negative control: if the gate had simply been removed, the auth assertion would stop asking too.
+
 ## 0.2.8
 - **Fixed: the switch notice named the wrong reason.** The line says "A → B", so the reason has to be why A went away — but it was read from the last failure the *walk* saw, which by then belongs to whichever candidate failed just before the winner. With one dead model those are the same string; with two they are not, and a balance wall on the starting model was announced as "(network)" because the channel tried after it had a socket reset. The reason now comes from the starting model's own failure. Observed live on 2026-10-18: 魔塔 was out of balance, nvidia answered, and the notice blamed the network.
 - The fallback to the last failure is kept for the case where the starting model never reported one (a host refusal, an aborted turn), so the notice stays populated.

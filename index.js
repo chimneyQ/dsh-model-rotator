@@ -99,7 +99,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
   retriesPerModel: 2,
   retryBackoffMs: 300,
   preferSameModel: true,
-  noticeSwitch: true,
+  noticeSwitch: false,
   disabledModels: [],
   quotaCooldownMs: 12 * 60 * 60 * 1000,
   quotaCooldownHour: 0,
@@ -287,6 +287,23 @@ const COMBO_PREFIX = 'combo:'
  * this plugin adds no auth of its own.
  */
 export const MODELS_PATH = '/_dsh/model-rotator/models'
+
+/**
+ * The switch log, read by the conversation tab.
+ *
+ * The same events used to be visible only as a notice row inside the
+ * conversation, which meant every switch spent context on a plumbing fact the
+ * reader may not have been looking at. The record now lives here instead, and
+ * the tab renders it; the in-conversation row stays opt-in.
+ *
+ * The route takes ?session= because the host does not hand a session to plugin
+ * routes (a plugin route runs outside any session boundary), so the page tells
+ * it which conversation it is showing.
+ */
+export const SWITCHES_PATH = '/_dsh/model-rotator/switches'
+
+/** How many switch records the log keeps before the oldest is dropped. */
+export const SWITCH_LOG_MAX = 200
 
 /** Body cap for the list's switch writes; the payload is a handful of strings. */
 const MAX_MODELS_BODY_BYTES = 64 * 1024
@@ -581,7 +598,10 @@ function normalizeConfig(raw) {
     ),
     retryBackoffMs: Math.min(Math.max(numberOr(raw.retryBackoffMs, base.retryBackoffMs), 0), 60000),
     preferSameModel: raw.preferSameModel !== false,
-    noticeSwitch: raw.noticeSwitch !== false,
+    // Unlike the two above, this one defaults to off: the switch record lives on
+    // the conversation's switch tab now, and the in-conversation row is the
+    // opt-in for a reader who wants it in the transcript as well.
+    noticeSwitch: raw.noticeSwitch === undefined ? base.noticeSwitch : raw.noticeSwitch !== false,
     weights: {
       connectivity: Math.max(numberOr(weights.connectivity, base.weights.connectivity), 0),
       speed: Math.max(numberOr(weights.speed, base.weights.speed), 0),
@@ -1001,6 +1021,20 @@ export function apply(ctx, config = {}, runtime = {}) {
    * ordinary switch notice once the turn boundary arrives.
    */
   const UNCONFIRMED_PURPOSES = new Set(['compaction'])
+
+  /**
+   * Failures where the switch is not a preference the reader can exercise.
+   *
+   * A balance that is gone does not come back inside the 10 second window, and a
+   * request the provider refuses as unsupported is refused identically on the
+   * next dispatch. Declining the question there cannot keep the model working -
+   * it only ends the turn, after making the reader read a modal and wait for the
+   * timeout. So these switch on their own; the notice (and the tab) still say so.
+   *
+   * Auth deliberately stays out: a 403 raised by a burst-rate proxy does clear,
+   * so "keep my model and let me retry" is a real choice there, not a formality.
+   */
+  const DEAD_END_KINDS = new Set(['quota', 'unsupported'])
 
   // ---- configuration ----------------------------------------------------------
 
@@ -1941,10 +1975,15 @@ export function apply(ctx, config = {}, runtime = {}) {
           // same decision with the right evidence.
           const adoptHere = cfg.adoptSwitchedModel && !hostRefusalSeen && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
           if (index > 0 && flowed && adoptHere) adoptServedModel(pair)
-          // Tell the reader which model answered instead of theirs. Recorded here
-          // and delivered at the turn boundary (see the notice listener), because
-          // this is the moment the walk actually left the model the user picked.
-          if (index > 0 && cfg.noticeSwitch) {
+          // Record which model answered instead of the one the reader picked.
+          //
+          // The record is kept unconditionally now: it is what the conversation's
+          // switch tab reads, and a reader who turned the in-conversation row off
+          // still wants the history. Whether a row is *also* steered into the
+          // conversation is decided at the turn boundary (see the notice
+          // listener), which is also where the session becomes known - a plugin
+          // route never gets one.
+          if (index > 0) {
             // One notice per *distinct* destination per turn. The same model on
             // another channel is a legitimate switch the first time it is
             // announced; announcing it again for the next sibling channel is what
@@ -1967,6 +2006,11 @@ export function apply(ctx, config = {}, runtime = {}) {
                 // notice populated when the starting model never reported one
                 // (a host refusal, an aborted turn).
                 reason: classifyFailureKind(String(startFailure ?? lastFailure ?? '')),
+                // When it happened and which kind of call it was: the tab shows
+                // both, and "compaction" is the difference between a switch the
+                // reader saw and one that happened underneath their turn.
+                at: Date.now(),
+                purpose: String(options.purpose ?? ''),
               })
               // The switch itself is the event worth persisting. Without this the
               // counters above were written but the *decision* was not, so a restart
@@ -2093,10 +2137,14 @@ export function apply(ctx, config = {}, runtime = {}) {
 
         // Consent gate. Asked once per turn: approving the first switch covers
         // the rest of the walk, so a cascade of dead models does not become a
-        // cascade of identical questions. Plumbing purposes skip it: nobody is
-        // reading the summary, and the question would park the turn on a modal
-        // that only times out (see UNCONFIRMED_PURPOSES).
-        const asksBeforeSwitching = cfg.confirmSwitch && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
+        // cascade of identical questions. Two things skip it: plumbing purposes,
+        // where nobody is reading the summary (see UNCONFIRMED_PURPOSES), and a
+        // deterministic dead end, where declining cannot keep the model working
+        // (see DEAD_END_KINDS).
+        const abandonedKind = classifyFailureKind(String(abandon ?? failure ?? ''))
+        const asksBeforeSwitching = cfg.confirmSwitch
+          && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
+          && !DEAD_END_KINDS.has(abandonedKind)
         if (!isLast && asksBeforeSwitching && switchVerdict === '') {
           switchVerdict = await confirmSwitch(options, cfg, key, candidates[index + 1], failedBecause)
           if (switchVerdict === 'deny') {
@@ -2167,16 +2215,71 @@ export function apply(ctx, config = {}, runtime = {}) {
    * context row in the middle of the reply it describes.
    */
   const noticeQueue = []
+  /** Switch history, oldest first, bounded. Served by SWITCHES_PATH. */
+  const switchLog = []
+  const appendSwitchLog = entry => {
+    switchLog.push(entry)
+    if (switchLog.length > SWITCH_LOG_MAX) switchLog.splice(0, switchLog.length - SWITCH_LOG_MAX)
+  }
+  /**
+   * The label the reader recognises.
+   *
+   * Same rule as the notice text: the model alone when the channel did not
+   * change, and the channel's own display name in front of it when it did.
+   */
+  const switchLabel = (from, to, side) => {
+    const self = side === 'from' ? from : to
+    const other = side === 'from' ? to : from
+    const channel = self.displayName === undefined || self.displayName === ''
+      ? self.provider
+      : self.displayName
+    return self.provider === other.provider ? self.model : channel + '/' + self.model
+  }
+  /**
+   * The switch records the tab shows, newest first.
+   *
+   * '' means "every session", which is what the tab falls back to when it could
+   * not tell which conversation it is rendering.
+   */
+  const switchEntries = (session, limit) => {
+    const rows = session === '' ? switchLog : switchLog.filter(row => row.session === session)
+    return rows.slice(-limit).reverse().map(row => ({
+      at: row.at,
+      session: row.session,
+      purpose: row.purpose,
+      reason: row.reason,
+      from: { provider: row.from.provider, model: row.from.model, label: switchLabel(row.from, row.to, 'from') },
+      to: { provider: row.to.provider, model: row.to.model, label: switchLabel(row.from, row.to, 'to') },
+    }))
+  }
   if (typeof ctx.on === 'function') {
     try {
       ctx.on('agent/turn-stopping', ({ agent, signal }) => {
         if (noticeQueue.length === 0) return
-        const pending = noticeQueue.splice(0, noticeQueue.length)
-        if (signal?.aborted === true) return
-        // Only a root conversation gets the row. Announcing a switch inside
-        // somebody else's subagent transcript would be noise in a log the reader
-        // never asked about.
+        // A subagent transcript is somebody else's log. Both the row and the
+        // record belong to the root conversation, and the queue must survive for
+        // it: consuming it here - which is what used to happen - is how a root
+        // conversation's switch went unannounced.
         if (agent?.session?.header?.parentSession !== undefined) return
+        const pending = noticeQueue.splice(0, noticeQueue.length)
+        // The session is known only here: the host does not hand one to a plugin
+        // route, and the llm/stream seam does not carry one. This boundary is the
+        // one place that both sees the switch and knows whose conversation it was.
+        const sessionId = String(agent?.session?.id ?? '')
+        for (const entry of pending) {
+          appendSwitchLog({
+            at: entry.at ?? Date.now(),
+            session: sessionId,
+            purpose: entry.purpose ?? '',
+            reason: entry.reason ?? '',
+            from: entry.from,
+            to: entry.to,
+          })
+        }
+        // The in-conversation row is opt-in. The record above is what the tab
+        // reads, so turning the row off loses nothing.
+        if (currentConfig().noticeSwitch !== true) return
+        if (signal?.aborted === true) return
         for (const notice of pending) {
           try { agent.steer(switchNoticeMessage(notice.from, notice.to, notice.reason)) }
           catch (error) {
@@ -2345,6 +2448,37 @@ export function apply(ctx, config = {}, runtime = {}) {
         scoped.effect(
           () => server.register({ kind: 'exact', path: MODELS_PATH, handler }),
           'model-rotator: model list route',
+        )
+
+        /**
+         * The switch log the conversation tab renders.
+         *
+         * Read-only on purpose: the tab is a view of what happened, and nothing
+         * about it needs to be written back. The session is a query parameter
+         * because this route runs outside any session boundary.
+         */
+        const switchesHandler = (req, res) => {
+          try {
+            const url = new URL(String(req?.url ?? '/'), 'http://localhost')
+            const session = String(url.searchParams.get('session') ?? '')
+            const requested = Number(url.searchParams.get('limit') ?? '')
+            const limit = Number.isFinite(requested) && requested > 0
+              ? Math.min(Math.trunc(requested), SWITCH_LOG_MAX)
+              : 50
+            sendJson(res, 200, {
+              ok: true,
+              generatedAt: Date.now(),
+              session,
+              total: switchLog.length,
+              entries: switchEntries(session, limit),
+            })
+          } catch (error) {
+            sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        scoped.effect(
+          () => server.register({ kind: 'exact', path: SWITCHES_PATH, handler: switchesHandler }),
+          'model-rotator: switch log route',
         )
       })
     } catch (error) {
@@ -2651,6 +2785,7 @@ export function apply(ctx, config = {}, runtime = {}) {
           : 'off; a switch stays silent'),
         '  vision twins     : never a candidate (the dsh-vision-router mode wraps a model, it is not a second one)',
         '  model list route : ' + MODELS_PATH + ' (GET the grouped list; POST {key, enabled} to switch one off or on)',
+        '  switch log route : ' + SWITCHES_PATH + ' (GET ?session=<id>&limit=<n> for the conversation tab)',
         '  image failover   : ' + (cfg.allowImageFailover ? 'allowed' : 'skipped (text-only turns only)'),
         '  switch confirm   : ' + (cfg.confirmSwitch
           ? 'ask first; switches on confirm or after ' + cfg.confirmTimeoutMs + 'ms, never on decline'

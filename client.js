@@ -27,8 +27,8 @@ window.__ModuleLoader__.load({
       "retriesPerModelHint": "同一个模型先重试几次才算真的失败（0 到 5）。填 0 表示一次失败就立刻换。",
       "retryBackoffMs": "重试前的退避时长（毫秒）",
       "retryBackoffMsHint": "第 n 次重试前等待 n 倍这个时间，避免把限流的渠道打得更狠；范围 0 到 60000。",
-      "noticeSwitch": "切换后在对话里提示",
-      "noticeSwitchHint": "模型切换后，在对话里加一行提示（形如「模型已切换：A → B」）。它是上下文提示行，不是模型回复，也不会触发新的模型调用。",
+      "noticeSwitch": "在对话中提示切换（默认关）",
+      "noticeSwitchHint": "切换记录已显示在「模型切换」页签；打开此项才会额外在对话里插入一行上下文通知（通知行不触发新的模型调用）。",
       "preferSameModel": "优先同名模型",
       "preferSameModelHint": "换模型时先试其他渠道的同名模型，再试相近型号，最后才按测量排名。",
       "adoptSwitchedModel": "切换后更新本会话的模型",
@@ -102,7 +102,27 @@ window.__ModuleLoader__.load({
       "models.lastError": "最近错误",
       "models.never": "没有测量记录",
       "models.readOnly": "config.json 不可写，这次改动只对当前进程有效。",
-      "models.writeFailed": "写入 config.json 失败，改动未保存。"
+      "models.writeFailed": "写入 config.json 失败，改动未保存。",
+      "switches.tab": "模型切换",
+      "switches.title": "本对话的模型切换",
+      "switches.hint": "按时间倒序列出这个对话里发生过的自动切换：什么时候、从哪个模型换到哪个模型、为什么换。",
+      "switches.count": "共 {n} 次切换",
+      "switches.column.time": "时间",
+      "switches.column.from": "从",
+      "switches.column.to": "到",
+      "switches.column.reason": "原因",
+      "switches.empty": "本对话暂无模型切换",
+      "switches.loading": "读取中…",
+      "switches.failed": "读取切换记录失败：",
+      "switches.allSessions": "未识别当前对话，下面是所有会话的切换记录。",
+      "switches.purpose.compaction": "上下文压缩触发",
+      "switches.reason.quota": "额度耗尽",
+      "switches.reason.network": "网络错误",
+      "switches.reason.rateLimit": "被限流",
+      "switches.reason.auth": "认证失败",
+      "switches.reason.server": "服务端错误",
+      "switches.reason.unsupported": "模型不支持",
+      "switches.reason.none": "未记录原因"
     };
     const en = {
       "title": "Model failover",
@@ -119,8 +139,8 @@ window.__ModuleLoader__.load({
       "retriesPerModelHint": "How many extra tries one model gets before it really counts as failed (0 to 5). 0 means the first failure switches immediately.",
       "retryBackoffMs": "Backoff before each retry (ms)",
       "retryBackoffMsHint": "The n-th retry waits n times this long, so a throttled provider is not hammered harder; 0 to 60000.",
-      "noticeSwitch": "Announce a switch in the conversation",
-      "noticeSwitchHint": "After a switch, post one line in the conversation (like \"model switched: A → B\"). It is a context notice row, not a model reply, and triggers no further model call.",
+      "noticeSwitch": "Announce a switch in the conversation (off by default)",
+      "noticeSwitchHint": "Switches are listed on the Model switches tab; turning this on additionally inserts one context row in the conversation (the row triggers no model call).",
       "preferSameModel": "Prefer the same model elsewhere",
       "preferSameModelHint": "Try the same model on another provider first, then close relatives, and only then the measured ranking.",
       "adoptSwitchedModel": "Show the served model in this session",
@@ -194,7 +214,27 @@ window.__ModuleLoader__.load({
       "models.lastError": "last error",
       "models.never": "no measurements yet",
       "models.readOnly": "config.json is not writable; this change applies to the running process only.",
-      "models.writeFailed": "Writing config.json failed; the change was not saved."
+      "models.writeFailed": "Writing config.json failed; the change was not saved.",
+      "switches.tab": "Model switches",
+      "switches.title": "Model switches in this conversation",
+      "switches.hint": "Every automatic switch in this conversation, newest first: when it happened, which model it moved to, and why.",
+      "switches.count": "{n} switches",
+      "switches.column.time": "Time",
+      "switches.column.from": "From",
+      "switches.column.to": "To",
+      "switches.column.reason": "Reason",
+      "switches.empty": "No model switches in this conversation yet",
+      "switches.loading": "Loading…",
+      "switches.failed": "Could not read the switch log: ",
+      "switches.allSessions": "Current conversation not identified; showing switches from every conversation.",
+      "switches.purpose.compaction": "context compaction",
+      "switches.reason.quota": "quota exhausted",
+      "switches.reason.network": "network error",
+      "switches.reason.rateLimit": "rate limited",
+      "switches.reason.auth": "auth failed",
+      "switches.reason.server": "server error",
+      "switches.reason.unsupported": "model unsupported",
+      "switches.reason.none": "reason not recorded"
     };
 
     /** The form frame's copy, read from this page's dictionary. */
@@ -890,6 +930,185 @@ window.__ModuleLoader__.load({
     }
     //#endregion
 
+    //#region lib/types/client/SwitchLog.js
+    /** Where the host serves this conversation's switch log. Kept in sync with SWITCHES_PATH in index.js. */
+    const SWITCHES_PATH = "/_dsh/model-rotator/switches";
+    /**
+     * How often the tab re-reads the log.
+     *
+     * The tab can sit open for a whole session while the rotator switches underneath
+     * it, and the Host publishes no event for that, so it polls. Five seconds is one
+     * cheap request against a log that lives in the host's memory.
+     */
+    const SWITCHES_POLL_MS = 5000;
+    /** Rows asked for per request; the host clamps this to its own ceiling. */
+    const SWITCHES_LIMIT = 200;
+
+    const switchWrapperStyle = { marginTop: "16px", paddingTop: "12px" };
+    const switchTitleStyle = { fontSize: "13px", fontWeight: 600 };
+    const switchHintStyle = { fontSize: "12px", opacity: 0.7, margin: "4px 0 10px", maxWidth: "46em" };
+    const switchNoteStyle = { fontSize: "12px", opacity: 0.7, padding: "8px 0" };
+    const switchRowStyle = { display: "flex", alignItems: "baseline", gap: "6px", padding: "5px 0", borderTop: "1px solid rgba(128,128,128,0.12)" };
+    const switchHeadStyle = Object.assign({}, switchRowStyle, { borderTop: "none", borderBottom: "1px solid rgba(128,128,128,0.25)", opacity: 0.7, fontSize: "11px" });
+    const switchTimeStyle = { flex: "0 0 5.5em", fontFamily: "monospace", fontSize: "11px", opacity: 0.75 };
+    const switchEndStyle = { flex: "1 1 8em", fontFamily: "monospace", fontSize: "12px", wordBreak: "break-all" };
+    const switchArrowStyle = { flex: "0 0 auto", opacity: 0.6, padding: "0 4px" };
+    const switchReasonStyle = { flex: "0 0 10em", fontSize: "12px", opacity: 0.85, textAlign: "right" };
+
+    /** Reason code the host reports -> dictionary key. Anything else (including "") reads as "not recorded". */
+    const SWITCH_REASONS = {
+      quota: "quota",
+      network: "network",
+      "rate-limit": "rateLimit",
+      auth: "auth",
+      server: "server",
+      unsupported: "unsupported"
+    };
+
+    /**
+     * The id of the conversation the reader is looking at.
+     *
+     * The Host renders a conversation.view tab with { inspectCall, viewRequest,
+     * openView, completeViewRequest } and nothing else - there is no session id in
+     * those props - so the id has to come off the sessions service. That service is
+     * deliberately NOT part of this plugin's fiber inject: a Host that never composed
+     * it would then fail to load the whole client half, for a tab that only wants a
+     * best-effort id. An unknown id degrades to the unfiltered log (every
+     * conversation), which is why this answers "" instead of throwing.
+     */
+    function currentSessionId(ctx) {
+      try {
+        const sessions = (ctx.get?.("sessions")) ?? ctx.sessions;
+        if (sessions === null || sessions === undefined) return "";
+        const list = sessions.list;
+        if (list === null || list === undefined || typeof list.getSnapshot !== "function") return "";
+        const snapshot = list.getSnapshot();
+        if (snapshot === null || snapshot === undefined) return "";
+        const current = snapshot.current;
+        if (current === undefined || current === null) return "";
+        return String(current);
+      } catch (error) {
+        return "";
+      }
+    }
+
+    /** One endpoint as text: the host's own label when it sent one, else "provider/model". */
+    function endpointText(endpoint) {
+      if (endpoint === null || typeof endpoint !== "object") return "";
+      const label = typeof endpoint.label === "string" ? endpoint.label.trim() : "";
+      if (label !== "") return label;
+      const provider = typeof endpoint.provider === "string" ? endpoint.provider : "";
+      const model = typeof endpoint.model === "string" ? endpoint.model : "";
+      if (provider !== "" && model !== "") return provider + "/" + model;
+      return provider !== "" ? provider : model;
+    }
+
+    /** "HH:MM:SS" in the reader's own time zone; "" when the host sent no usable stamp. */
+    function switchTime(at) {
+      const value = Number(at);
+      if (Number.isFinite(value) === false || value <= 0) return "";
+      const when = new Date(value);
+      if (Number.isNaN(when.getTime())) return "";
+      const pad = (part) => (part < 10 ? "0" + part : String(part));
+      return pad(when.getHours()) + ":" + pad(when.getMinutes()) + ":" + pad(when.getSeconds());
+    }
+
+    /**
+     * Why the rotator moved, in the reader's language.
+     *
+     * Own-property only: an unexpected code ("constructor", say) must fall through to
+     * "not recorded" rather than inherit a key off Object.prototype and print a
+     * function into the reason column.
+     */
+    function switchReason(t, reason) {
+      const code = String(reason === undefined || reason === null ? "" : reason);
+      const known = Object.prototype.hasOwnProperty.call(SWITCH_REASONS, code);
+      return known === false ? t("switches.reason.none") : t("switches.reason." + SWITCH_REASONS[code]);
+    }
+
+    /**
+     * Build the tab that shows this conversation's model switches.
+     *
+     * The Host hands a conversation.view tab only { inspectCall, viewRequest,
+     * openView, completeViewRequest }: no dictionary and no session, so both are
+     * closed over here rather than read from props.
+     */
+    function makeSwitchLogView(ctx, t) {
+      /** Time, from -> to, and why - one row per automatic switch. */
+      return function SwitchLogView() {
+        const [state, setState] = React.useState({ status: "loading", entries: [], total: 0, error: "", session: "" });
+        const load = React.useCallback(() => {
+          const session = currentSessionId(ctx);
+          const query = "?limit=" + SWITCHES_LIMIT + (session === "" ? "" : "&session=" + encodeURIComponent(session));
+          return fetch(SWITCHES_PATH + query, { headers: { accept: "application/json" } })
+            .then((response) => response.json().catch(() => null).then((payload) => ({ response, payload })))
+            .then(({ response, payload }) => {
+              if (!response.ok) throw new Error((payload && payload.error) || ("HTTP " + response.status));
+              const entries = payload !== null && Array.isArray(payload.entries) ? payload.entries : [];
+              const total = payload !== null && Number.isFinite(Number(payload.total)) ? Number(payload.total) : entries.length;
+              setState({ status: "ready", entries: entries, total: total, error: "", session: session });
+            })
+            .catch((error) => {
+              setState({ status: "failed", entries: [], total: 0, error: String((error && error.message) || error), session: session });
+            });
+        }, []);
+        // Poll, and stop on unmount: a tab left open for hours still wants fresh rows,
+        // but an interval that outlives it would keep querying a log nobody is reading.
+        React.useEffect(() => {
+          let live = true;
+          const tick = () => { if (live) load(); };
+          tick();
+          const timer = setInterval(tick, SWITCHES_POLL_MS);
+          return () => { live = false; clearInterval(timer); };
+        }, [load]);
+
+        // Children go INSIDE the props object, never as jsx's third argument: the
+        // automatic runtime's jsx(type, props, key) reads props.children, so a third
+        // argument is dropped on the floor - and the tab would render an empty box.
+        const rows = [];
+        if (state.status === "failed") {
+          rows.push(jsx("div", {
+            key: "__failed",
+            style: Object.assign({}, switchNoteStyle, { color: HEALTH_COLOR.error }),
+            children: t("switches.failed") + state.error
+          }));
+        } else if (state.entries.length === 0) {
+          rows.push(jsx("div", {
+            key: "__empty",
+            style: switchNoteStyle,
+            "data-switch-empty": true,
+            children: state.status === "loading" ? t("switches.loading") : t("switches.empty")
+          }));
+        } else {
+          rows.push(jsx("div", { key: "__head", style: switchHeadStyle, children: [
+            jsx("span", { key: "time", style: switchTimeStyle, children: t("switches.column.time") }),
+            jsx("span", { key: "from", style: switchEndStyle, children: t("switches.column.from") }),
+            jsx("span", { key: "arrow", style: switchArrowStyle, children: "" }),
+            jsx("span", { key: "to", style: switchEndStyle, children: t("switches.column.to") }),
+            jsx("span", { key: "reason", style: switchReasonStyle, children: t("switches.column.reason") })
+          ] }));
+          state.entries.forEach((entry, index) => {
+            const row = entry === null || entry === undefined ? {} : entry;
+            const reason = switchReason(t, row.reason);
+            const compaction = row.purpose === "compaction" ? t("switches.purpose.compaction") : "";
+            rows.push(jsx("div", { key: "row-" + String(index), style: switchRowStyle, "data-switch-row": true, children: [
+              jsx("span", { key: "time", style: switchTimeStyle, children: switchTime(row.at) }),
+              jsx("span", { key: "from", style: switchEndStyle, children: endpointText(row.from) }),
+              jsx("span", { key: "arrow", style: switchArrowStyle, children: "→" }),
+              jsx("span", { key: "to", style: switchEndStyle, children: endpointText(row.to) }),
+              jsx("span", { key: "reason", style: switchReasonStyle, children: compaction === "" ? reason : reason + " · " + compaction })
+            ] }));
+          });
+        }
+        const head = [];
+        head.push(jsx("div", { key: "__title", style: switchTitleStyle, children: t("switches.title") }));
+        head.push(jsx("div", { key: "__count", style: switchHintStyle, children: state.status === "ready" && state.total > 0 ? fill(t("switches.count"), { n: state.total }) : t("switches.hint") }));
+        if (state.session === "") head.push(jsx("div", { key: "__scope", style: switchHintStyle, children: t("switches.allSessions") }));
+        return jsx("div", { key: "switches", "data-switch-log": true, style: switchWrapperStyle, children: head.concat(rows) });
+      };
+    }
+    //#endregion
+
     //#region lib/types/client/ModelRotatorCard.js
     /**
      * Render the rotator's one-liner or its settings form, as the Plugins page asks.
@@ -1021,6 +1240,11 @@ window.__ModuleLoader__.load({
      *   - plugins.item is the Plugins panel card list - a sidebar panel, not a
      *     settings page - and it renders the same form as its card body.
      * Either consumer renders the whole form, so both get the same component.
+     *
+     * A third slot carries the switch log rather than the form: conversation.view is
+     * the chat shell's tab strip - the one holding 对话 / 轨迹 / 上下文 / 白板看板 -
+     * and a tab there is what lets the log replace the notice line this plugin used
+     * to steer into the conversation itself.
      */
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
@@ -1045,6 +1269,17 @@ window.__ModuleLoader__.load({
       // served, so the unconditional registration degrades gracefully instead of vanishing.
       ctx.slots.inject("settings.section", () => ctx.slots.register(definition("settings.section", 20), ModelRotatorCard));
       ctx.slots.inject("plugins.item", () => ctx.slots.register(definition("plugins.item", 45), ModelRotatorCard));
+      // The tabs this one sits between: 记忆 is 78, 白板看板 is 80, 白板画布 is 81.
+      // No `inject` here: this cell renders a view, not a settings form, so it has no
+      // staged fields to hand the host. The session id the tab needs is read at
+      // request time (see currentSessionId) instead of being injected as a service.
+      ctx.slots.inject("conversation.view", () => ctx.slots.register({
+        name: "conversation.view",
+        id: "model-rotator-switches",
+        order: 79,
+        label: () => t("switches.tab"),
+        locale: NS
+      }, makeSwitchLogView(ctx, t)));
     }
     //#endregion
 

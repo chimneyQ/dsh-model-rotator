@@ -71,17 +71,32 @@ every ordinary turn — keeps failing over exactly as before.
 
 ## Announcing a switch
 
-A switch is otherwise silent: the reply simply arrives from a different model. By
-default the plugin posts one line in the conversation when that happens —
-`模型已切换：A → B`, with the failure kind in brackets when it is known
-(`(quota)`, `(rate-limit)`).
+A switch is otherwise silent: the reply simply arrives from a different model.
+The plugin now records it on the **Model switches** tab, beside 对话 / 轨迹 /
+上下文, one row per switch — when it happened, which model answered instead, and
+why:
+
+```
+14:07:31  modelscope/deepseek-ai/DeepSeek-V4.1-Flash → trae/deepseek-v4.1-flash   (quota)
+```
+
+The tab reads the plugin's own record
+(`GET /_dsh/model-rotator/switches?session=<id>`), so a switch costs **no
+conversation context**. Records are filed per conversation: the host hands no
+session to a plugin route, so the session is bound at the turn boundary — the one
+moment that both sees the switch and knows whose conversation it was.
+
+If you also want the old line in the transcript, turn `noticeSwitch` on and the
+plugin posts it as before — `模型已切换：A → B`, with the failure kind in brackets
+when it is known (`(quota)`, `(rate-limit)`).
 
 | Behaviour | |
 |-----------|--|
+| Default | **not posted** (`noticeSwitch: false`). The record is on the tab; the row is optional |
 | Shape | the host's own notice mechanism: a `user/message` whose source is `{ kind: 'model-rotator/switch', form: 'notice', summary }`. The conversation UI renders that form as a context row, not as something you typed |
 | Timing | at the turn boundary, via `agent/turn-stopping` + `agent.steer`. The switch already happened and the answer is already streaming, so announcing it mid-turn would insert a row in the middle of the reply it describes |
 | Scope | the root conversation only. A switch inside a subagent transcript is somebody else's log |
-| Off | `noticeSwitch: false` (or the settings-page toggle) |
+| On | `noticeSwitch: true` (or the settings-page toggle) |
 
 The event type is deliberately **not** a private one. The persistence reader
 refuses to interpret a session log containing a type it does not know
@@ -111,6 +126,14 @@ human-interaction seam (`ctx.userQuestions.askTimed()`), offering **切换** and
 The question is raised **once per turn**: approving the first switch covers the
 rest of that walk, so a cascade of dead models does not become a cascade of
 identical cards. The wait is 20 s by default and configurable.
+
+**Two failures are no longer asked about.** An exhausted balance (`quota`) and a
+request the provider refuses as unsupported (`unsupported`) are deterministic
+dead ends: the money does not come back inside the window and the next dispatch is
+refused identically. Declining there cannot keep the model working — it only ends
+the turn, after a card and a wait — so those switch on their own, and the tab
+still records why. **Auth keeps its question**: a 403 is often a burst-rate proxy
+that clears, so "keep my model and let me retry" is a real choice there.
 
 Failover is deliberately fail-open. If the seam is missing, the ask throws, the
 turn has no live root agent (a delegated sub-agent has nobody to answer), or the
@@ -268,8 +291,9 @@ Every field has a safe default, so the plugin works with no file at all.
   n times this, capped at 10 s).
 - `preferSameModel` — rank the same model on another provider first, then close
   relatives, then the measured ranking (default `true`).
-- `noticeSwitch` — post the one-line switch notice in the conversation (default
-  `true`; see "Announcing a switch" above).
+- `noticeSwitch` — *also* post the one-line switch notice in the conversation
+  (default `false`; the switch record is on the Model switches tab either way —
+  see "Announcing a switch" above).
 - `weights` — connectivity vs speed in the score.
 - `excludeProviders` / `excludeModels` — keep specific routes out of the pool.
 - `excludePatterns` — extra regex sources appended to the non-chat deny list.
