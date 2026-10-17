@@ -11,6 +11,9 @@ const manifest = JSON.parse(read('package.json'))
 const index = read('index.js')
 const client = read('client.js')
 const readme = read('README.md')
+const readmeZh = read('README.zh.md')
+const changeEn = read('CHANGELOG.md')
+const changeZh = read('CHANGELOG.zh.md')
 const results = []
 const ck = (label, cond, extra = '') => results.push([cond ? 'PASS' : 'FAIL', label, extra])
 
@@ -61,7 +64,14 @@ try {
 ck('15 the submission entry has the required keys', yamlOk, yamlDetail)
 
 // 6. the sha manifest matches the shipped files
-const sums = read('SHA256SUMS.txt').trim().split(/\r?\n/).map(l => l.split(/\s+/))
+// A leading comment line is part of the file format (both repos carry one), and lines
+// that are not "<hash>  <file>" must be skipped rather than parsed as a filename — the
+// previous form fed "#" into readFileSync and crashed the whole gate with ENOENT,
+// which is worse than a failed assertion because it hides every other check behind it.
+const sums = read('SHA256SUMS.txt').trim().split(/\r?\n/)
+  .map((l) => l.trim())
+  .filter((l) => l && !l.startsWith('#'))
+  .map((l) => l.split(/\s+/))
 const { createHash } = await import('node:crypto')
 const sumOk = sums.every(([hash, file]) => createHash('sha256').update(readFileSync(pub + '/' + file)).digest('hex') === hash)
 ck('16 SHA256SUMS matches the shipped bytes', sumOk, sums.length + ' entries')
@@ -80,6 +90,21 @@ ck('17 the schema loader capability-tests volatile()', probesVolatile && !hasWea
 const PATH_SIG = new RegExp(['D', ':/DS_', 'harness|', '插件', '开发'].join(''))
 const hardcoded = readdirSync(pub).filter(f => /^(test.*|release-check)\.mjs$/.test(f)).filter(f => PATH_SIG.test(read(f)))
 ck('18 no test hardcodes a machine-local plugin path', hardcoded.length === 0, hardcoded.join(',') || 'none')
+
+// The changelog is what a user reads to learn what changed, so it must exist in both
+// languages and actually reach the shipped version — a changelog that stops at an
+// older release documents a plugin that no longer exists.
+ck('19a a changelog exists in both languages', changeEn.length > 400 && changeZh.length > 250, 'en=' + changeEn.length + ' zh=' + changeZh.length)
+{
+  const vEn = (changeEn.match(/^## /gm) ?? []).length
+  const vZh = (changeZh.match(/^## /gm) ?? []).length
+  ck('19b the changelogs cover the same versions', vEn === vZh && vEn >= 4, 'en=' + vEn + ' zh=' + vZh)
+}
+ck('19c the changelog is linked from both READMEs', readme.includes('CHANGELOG.md') && readmeZh.includes('CHANGELOG.zh.md'))
+ck('19d the newest changelog section is the shipped version',
+  new RegExp('^## ' + manifest.version.replace(/\./g, '\\.') + '$', 'm').test(changeEn) &&
+  new RegExp('^## ' + manifest.version.replace(/\./g, '\\.') + '$', 'm').test(changeZh),
+  'version=' + manifest.version)
 
 let failed = 0
 for (const [st, label, extra] of results) { if (st === 'FAIL') failed += 1; console.log(st.padEnd(5), label, extra === '' ? '' : '[' + extra + ']') }

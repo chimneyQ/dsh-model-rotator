@@ -1,6 +1,6 @@
 # dsh-model-rotator
 
-> [简体中文](./README.zh.md) | **English**
+> [简体中文](./README.zh.md) | **English** | [Changelog](./CHANGELOG.md)
 
 Model auto-ranking and transparent failover for DeepSeek Harness.
 
