@@ -745,28 +745,81 @@ const switchRun = async (behaviour, config, seams) => {
   }
 }
 
-// ---- scenario 15: automatic calls are not conversation turns -------------------
-// A compaction refusal is a statement about that lane ("bili owns compression
-// here"), not about the model being unreachable, so asking a second provider to
-// carry the plumbing is exactly the wrong reflex. The gate keys on the purpose
-// the host itself sets, and an unnamed call stays in scope.
+// ---- scenario 15: which automatic calls are conversation turns ----------------
+// A session title is plumbing nobody waits on: a refusal there is a statement
+// about that lane, so it stays on the model that was asked. A compaction is
+// plumbing the turn cannot proceed without - when the model's quota is gone the
+// summary call is the first casualty, and passing that failure through kills the
+// whole turn - so it walks the candidate list like any other dead route.
 {
   const auto = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: '422: dsh native compaction call refused by billion-context' } } }]
-  const h = makeCtx(auto)
-  apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
-  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [], purpose: 'compaction' }))
-  check('15a a compaction call does not fail over', h.attempted.join(',') === 'provA/alpha', 'attempted=' + h.attempted.join(','))
-  check('15b its error still reaches the caller untouched', chunks.length > 0 && chunks[chunks.length - 1].reason?.kind === 'error', JSON.stringify(chunks).slice(0, 160))
+  const quota = () => [{ type: 'finish', reason: { kind: 'error', failure: { message: 'insufficient balance' } } }]
 
   const title = makeCtx(auto)
   apply(title.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
   await collect(title.run({ provider: 'provA', model: 'alpha', messages: [], purpose: 'session-title' }))
-  check('15c a session-title call does not fail over', title.attempted.join(',') === 'provA/alpha', 'attempted=' + title.attempted.join(','))
+  check('15a a session-title call does not fail over', title.attempted.join(',') === 'provA/alpha', 'attempted=' + title.attempted.join(','))
 
   const turn = makeCtx(auto)
   apply(turn.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
   await collect(turn.run({ provider: 'provA', model: 'alpha', messages: [] }))
-  check('15d an ordinary turn keeps failing over', turn.attempted.length > 1, 'attempted=' + turn.attempted.join(','))
+  check('15b an ordinary turn keeps failing over', turn.attempted.length > 1, 'attempted=' + turn.attempted.join(','))
+
+  // The regression 0.2.7 exists for: a compaction whose model is out of quota.
+  // Two failures then a success is the shape that distinguishes "walked the
+  // list" from "gave up on the first candidate" *and* from "only one candidate
+  // was ever in scope" - the latter passes a two-channel fixture for the wrong
+  // reason.
+  const comp = makeCtx((options) => (options.model === 'gamma'
+    ? [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'summary from gamma' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    : quota()))
+  apply(comp.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  const compChunks = await collect(comp.run({ provider: 'provA', model: 'alpha', messages: [], purpose: 'compaction' }))
+  const compText = compChunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+  check('15c a quota-dead compaction fails over and completes',
+    comp.attempted.length >= 3 && compText.includes('summary from gamma') && compChunks[compChunks.length - 1]?.reason?.kind === 'stop',
+    'attempted=' + comp.attempted.join(',') + ' text=' + JSON.stringify(compText))
+
+  // Same failure, but nothing can serve it: the provider's own words must still
+  // be what the caller sees, not a paraphrase of the walk.
+  const dead = makeCtx(quota)
+  apply(dead.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  const deadChunks = await collect(dead.run({ provider: 'provA', model: 'alpha', messages: [], purpose: 'compaction' }))
+  check('15d an exhausted compaction still reports the provider error',
+    dead.attempted.length > 1 && deadChunks[deadChunks.length - 1]?.reason?.kind === 'error'
+      && String(deadChunks[deadChunks.length - 1]?.reason?.failure?.message ?? '').includes('insufficient balance'),
+    'attempted=' + dead.attempted.join(',') + ' finish=' + JSON.stringify(deadChunks[deadChunks.length - 1]?.reason))
+
+  // The consent question must not park a summary nobody is reading. Asked with
+  // the default config (confirmSwitch on) and a seam that would record it.
+  const { asks, adoptions, seams } = seamsFor({ selected: ['切换'] })
+  const asked = makeCtx((options) => (options.model === 'alpha' ? quota() : [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: 'summary' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), seams)
+  apply(asked.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(asked.run({ provider: 'provA', model: 'alpha', messages: [], purpose: 'compaction' }))
+  check('15e a compaction switch does not ask the reader', asks.length === 0 && asked.attempted.length > 1,
+    'asks=' + asks.length + ' attempted=' + asked.attempted.join(','))
+  check('15f a compaction switch does not adopt the model', adoptions.length === 0, 'adoptions=' + adoptions.length)
+
+  // Negative control: the same fixture with an ordinary turn *does* ask and
+  // *does* adopt, so 15e/15f are not passing because the seams never fire.
+  const { asks: turnAsks, adoptions: turnAdoptions, seams: turnSeams } = seamsFor({ selected: ['切换'] })
+  const turn2 = makeCtx((options) => (options.model === 'alpha' ? quota() : [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: 'answer' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), turnSeams)
+  apply(turn2.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(turn2.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('15g an ordinary turn still asks and adopts', turnAsks.length === 1 && turnAdoptions.length === 1,
+    'asks=' + turnAsks.length + ' adoptions=' + turnAdoptions.length)
 }
 
 // ---- scenario 16: the vision mode is a mode, not a model ----------------------

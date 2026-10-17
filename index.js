@@ -966,19 +966,41 @@ export function apply(ctx, config = {}, runtime = {}) {
   // ---- automatic calls ---------------------------------------------------------
 
   /**
-   * Purposes that are not the conversation.
+   * Purposes that are *not* worth a second provider.
    *
-   * A compaction summary and a session title ride the same llm/stream seam as a
-   * user turn but are *not* a user turn: nothing about them is answered to a
-   * human, and failing one over asks a second provider to do plumbing work the
-   * first provider refused. That refusal is also frequently a policy answer -
-   * "this lane owns compression" - which another model would happily ignore.
+   * A session title rides the same llm/stream seam as a user turn but is not a
+   * user turn: nobody is waiting on it, and failing it over asks a second
+   * provider to do a caption the first one refused. A refusal there is also
+   * frequently a policy answer - "this lane owns titles" - which another model
+   * would happily ignore. So a title stays on the model that was asked.
+   *
+   * Compaction is deliberately *not* in this set, even though it is plumbing
+   * too. It is plumbing the turn cannot proceed without: when the current
+   * model's quota is exhausted, the summary call is the first thing to fail,
+   * and passing that failure through ends the whole turn before a single token
+   * of the user's answer exists. A compaction that cannot run is therefore a
+   * dead route, exactly like a failed conversation attempt, and it walks the
+   * same candidate list - see AUTOMATIC_SWITCH_PURPOSES for what it skips.
+   *
    * The names come from the host itself (dsh-compaction-basic passes
    * purpose: "compaction", dsh-session-title-llm passes "session-title"), and an
    * unnamed call stays in scope, so the ordinary turns - which carry no purpose
    * at all - keep failing over exactly as before.
    */
-  const AUTOMATIC_PURPOSES = new Set(['compaction', 'session-title'])
+  const AUTOMATIC_PURPOSES = new Set(['session-title'])
+
+  /**
+   * Purposes that fail over without asking.
+   *
+   * The switch question exists to keep the reader in charge of *their*
+   * conversation: a model they did not pick answering their words is worth a
+   * confirmation. A compaction summary is not their words, and the question
+   * would land while the turn is still being assembled - a 20 second stall on
+   * plumbing nobody is reading, which on timeout switches anyway. The walk
+   * therefore proceeds unconfirmed and the reader learns about it from the
+   * ordinary switch notice once the turn boundary arrives.
+   */
+  const UNCONFIRMED_PURPOSES = new Set(['compaction'])
 
   // ---- configuration ----------------------------------------------------------
 
@@ -1898,7 +1920,14 @@ export function apply(ctx, config = {}, runtime = {}) {
           // dispatch never reached a provider, so an answer here does not mean the
           // user's model is unreachable, and adopting would change their model
           // behind a fault rather than behind a failure.
-          if (index > 0 && flowed && cfg.adoptSwitchedModel && !hostRefusalSeen) adoptServedModel(pair)
+          // Plumbing purposes are excluded from adoption on purpose: a compaction
+          // that fails because the *context* is too large for this model says
+          // nothing about the model's fitness for the conversation, and adopting
+          // there would change the reader's model behind a size limit rather than
+          // behind a dead route. The conversation attempt that follows makes the
+          // same decision with the right evidence.
+          const adoptHere = cfg.adoptSwitchedModel && !hostRefusalSeen && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
+          if (index > 0 && flowed && adoptHere) adoptServedModel(pair)
           // Tell the reader which model answered instead of theirs. Recorded here
           // and delivered at the turn boundary (see the notice listener), because
           // this is the moment the walk actually left the model the user picked.
@@ -2041,8 +2070,11 @@ export function apply(ctx, config = {}, runtime = {}) {
 
         // Consent gate. Asked once per turn: approving the first switch covers
         // the rest of the walk, so a cascade of dead models does not become a
-        // cascade of identical questions.
-        if (!isLast && cfg.confirmSwitch && switchVerdict === '') {
+        // cascade of identical questions. Plumbing purposes skip it: nobody is
+        // reading the summary, and the question would park the turn on a modal
+        // that only times out (see UNCONFIRMED_PURPOSES).
+        const asksBeforeSwitching = cfg.confirmSwitch && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
+        if (!isLast && asksBeforeSwitching && switchVerdict === '') {
           switchVerdict = await confirmSwitch(options, cfg, key, candidates[index + 1], failedBecause)
           if (switchVerdict === 'deny') {
             yield {
