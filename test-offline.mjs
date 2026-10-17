@@ -1,8 +1,9 @@
 
 import { mkdtempSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { apply, classifyFailureKind, isHostRefusal, isNonChatModelId, quotaRestUntil, switchNoticeFor } from './index.js'
+import { apply, classifyFailureKind, isHostRefusal, isNonChatModelId, parseReleaseTime, quotaRestUntil, switchNoticeFor } from './index.js'
 
 // Keep the file layer out of these assertions: the config path is read inside
 // apply(), so pointing it at a path that does not exist pins the suite to the
@@ -1233,7 +1234,86 @@ const quietHandle = (value) => ({
   }
 }
 
+// ---- account-pool exhaustion is a quota wall, and it states its own release ----
+{
+  const REAL = 'WorkBuddy (国际版)：模型 deepseek-v4.1-flash 的可用账号均在限流中，最近一个将于 2026/10/18 00:29:52 解禁。可改用其它 provider / 模型，'
+  // Every account exhausted is not a rate blip: as rate-limit it cooled 60s and
+  // retried the same wall hundreds of times in one evening.
+  check('an exhausted account pool classifies as quota, not rate-limit',
+    classifyFailureKind(REAL) === 'quota', classifyFailureKind(REAL))
+  // The narrowness matters: an ordinary 429 must keep the cheap backoff.
+  check('an ordinary rate limit is still rate-limit',
+    classifyFailureKind('429 too many requests') === 'rate-limit' &&
+    classifyFailureKind('请求过于频繁，请稍后再试') === 'rate-limit')
+  check('the existing quota vocabulary still classifies as quota',
+    ['账户余额不足', 'quota exceeded', '额度已用尽'].every(t => classifyFailureKind(t) === 'quota'))
+
+  // The provider says exactly when the pool comes back; that beats any calendar rule.
+  const stated = parseReleaseTime(REAL)
+  const asLocal = stated ? new Date(stated) : null
+  check('the stated release time is parsed from the sentence',
+    asLocal !== null && asLocal.getFullYear() === 2026 && asLocal.getMonth() === 9 &&
+    asLocal.getDate() === 18 && asLocal.getHours() === 0 && asLocal.getMinutes() === 29 &&
+    asLocal.getSeconds() === 52,
+    asLocal ? asLocal.toISOString() : 'unparsed')
+  check('a date without a time parses as that day, and prose without one parses as nothing',
+    parseReleaseTime('release at 2026/12/25') > 0 && parseReleaseTime('no date here') === 0)
+}
+
+// ---- a pin defers while it cools, instead of walking into the same wall ----
+{
+  // The walk only reveals the head when the current model fails first, so every
+  // run here makes provA/alpha fail with an empty turn and lets the ranking decide
+  // the rest. That is also the shape of the real complaint: a pinned model that is
+  // cooling must not be dispatched before a healthy one.
+  const runWithPin = async (row) => {
+    freshStatsFile()
+    if (row !== undefined) {
+      const { writeFileSync } = await import('node:fs')
+      writeFileSync(process.env.DSH_MODEL_ROTOR_STATS, JSON.stringify({ version: 1, rows: { 'provA/beta': row } }, null, 2), 'utf8')
+    }
+    const cfgFile = join(sandbox, 'pin-config-' + (row === undefined ? 'none' : 'cool') + '.json')
+    const { writeFileSync: wf } = await import('node:fs')
+    wf(cfgFile, JSON.stringify({ pinned: 'provA/beta' }), 'utf8')
+    process.env.DSH_MODEL_ROTOR_CONFIG = cfgFile
+    // alpha always fails with no content, so the walk continues past it.
+    const h = makeCtx(() => ([{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }]))
+    apply(h.ctx, { confirmSwitch: false }, {})
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    return h.attempted
+  }
+
+  const healthy = await runWithPin({
+    savedAt: Date.now(), attempts: 9, successes: 9, failures: 0,
+    consecutiveFailures: 0, cooldownUntil: 0, lastError: '', lastErrorKind: '',
+  })
+  // Each model is retried, so the walk lists attempts rather than models. The
+  // question is only which model the walk reaches *after* the current one.
+  const secondModel = attempts => {
+    const first = attempts[0]
+    return attempts.find(a => a !== first)
+  }
+  check('a healthy pin is tried first after the current model',
+    healthy[0] === 'provA/alpha' && secondModel(healthy) === 'provA/beta',
+    'order=' + healthy.join(','))
+
+  // Hydration is a once-per-boot step, so a second harness in this process would
+  // reuse the first one's rows. The cooling case therefore runs in its own process
+  // (test-pin-cooling.mjs), where the seeded row is what boots.
+  {
+    const { spawnSync } = await import('node:child_process')
+    const probe = join(dirname(fileURLToPath(import.meta.url)), 'test-pin-cooling.mjs')
+    const out = spawnSync(process.execPath, [probe], { encoding: 'utf8', timeout: 60000 })
+    let order = []
+    try { order = JSON.parse(String(out.stdout).trim().split('\n').pop()).order } catch { /* asserted below */ }
+    check('a cooling pin is not dispatched ahead of a healthy model',
+      order.length > 1 && order[1] !== 'provA/beta',
+      'order=' + order.join(',') + (out.stderr ? '  stderr=' + String(out.stderr).slice(0, 100) : ''))
+  }
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))
 process.exit(failed.length === 0 ? 0 : 1)
+

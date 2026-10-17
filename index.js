@@ -703,6 +703,12 @@ const FAILURE_KIND_TESTS = [
   // that classification would cost the daily rest a dead balance needs.
   ['unsupported', /(does not support|doesn't support|unsupported|not supported|no such model|unknown model|model not found|invalid model|model is not available)/i],
   ['auth', /(invalid[ _-]*api[ _-]*key|api[ _-]*key[ _-]*(invalid|missing|expired)|unauthori[sz]ed|unauthenticated|authentication|credential|permission denied|forbidden|401|403|鉴权|密钥|授权失败|认证失败)/i],
+  // An account pool that is entirely unavailable is a quota wall wearing the
+  // word "rate limit". WorkBuddy answers "可用账号均在限流中，最近一个将于 … 解禁" —
+  // every account exhausted, with the release timestamp in the sentence. Classified
+  // as rate-limit it cooled for 60s and retried the same wall 702 times in one
+  // evening; as quota it rests until the pool actually comes back.
+  ['quota', /(?:可用)?账号[^。，,;；]{0,6}(?:均|全部|都)[^。，,;；]{0,8}(?:限流|不可用|耗尽|用尽)|均在限流|均不可用|all accounts?(?:[ _-]+\w+){0,3}[ _-]+(?:exhausted|unavailable|rate[ _-]*limited)|every account[ _-]+(?:is[ _-]+)?(?:exhausted|unavailable)/i],
   ['rate-limit', /(rate[ _-]*limit|too many requests|request[ _-]*limit|throttl|429|限流|请求过于频繁|过于频繁|qps)/i],
   ['server', /(internal[ _-]*server[ _-]*error|bad[ _-]*gateway|service[ _-]*unavailable|server[ _-]*(error|overload)|overloaded|gateway[ _-]*timeout|50[0-9])/i],
   ['network', /(econnreset|econnrefused|etimedout|enotfound|eai_again|socket|network|fetch failed|timed?[ _-]?out|timeout|disconnected|connection (closed|reset|refused)|aborted)/i],
@@ -768,9 +774,54 @@ export function quotaRestUntil(nowMs, cfg) {
   return Math.max(boundary.getTime(), nowMs + floor)
 }
 
+/**
+ * A release time the provider stated in its own words, in epoch ms, or 0.
+ *
+ * A quota message often says exactly when the pool comes back — WorkBuddy writes
+ * "最近一个将于 2026/10/18 00:29:52 解禁". That timestamp is strictly better than any
+ * policy we could invent: it is the provider telling us when to try again. Fixed
+ * midnight arithmetic ignored it and could either sleep far too long or wake into
+ * the same wall.
+ *
+ * Accepts the shapes that actually appear: `2026/10/18 00:29:52`, `2026-10-18
+ * 00:29:52`, and an ISO 8601 stamp. A date with no time is treated as that day's
+ * midnight. The value is read in the host's local zone, which is the zone these
+ * messages are written in.
+ *
+ * Returns 0 when nothing parseable is present, so the caller falls back to policy.
+ * Exported as a test seam: this is date arithmetic on prose, exactly the kind of
+ * thing that should be pinned by an offline assertion.
+ */
+export function parseReleaseTime(message) {
+  const text = String(message ?? '')
+  if (text === '') return 0
+  const patterns = [
+    /(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/,
+    /(\d{4})[/-](\d{1,2})[/-](\d{1,2})/,
+  ]
+  for (const re of patterns) {
+    const m = text.match(re)
+    if (m === null) continue
+    const [, y, mo, d, h = '0', mi = '0', sec = '0'] = m
+    const at = new Date(
+      Number(y), Number(mo) - 1, Number(d),
+      Number(h), Number(mi), Number(sec), 0,
+    )
+    const ms = at.getTime()
+    // A provider sentence about the past is a stale copy, not a release time.
+    if (Number.isFinite(ms) && ms > 0) return ms
+  }
+  return 0
+}
+
 /** Instant until which this failure keeps the candidate out of the ranking. */
-function cooldownUntilFor(stat, cfg, nowMs, errorKind) {
-  if (errorKind === 'quota') return quotaRestUntil(nowMs, cfg)
+function cooldownUntilFor(stat, cfg, nowMs, errorKind, message) {
+  if (errorKind === 'quota') {
+    // The provider's own release timestamp outranks our calendar policy.
+    const stated = parseReleaseTime(message)
+    if (stated > nowMs) return stated
+    return quotaRestUntil(nowMs, cfg)
+  }
   return nowMs + cooldownFor(stat, cfg)
 }
 
@@ -1476,9 +1527,18 @@ export function apply(ctx, config = {}, runtime = {}) {
     const ordered = [current, ...byFamily.map(row => row.pair)]
 
     // A pin short-circuits the ranking: the user asked for this head explicitly.
+    //
+    // Unless it is cooling down. A pin is a preference about which healthy model to
+    // try first, not a promise to walk into the same wall every turn: a pinned model
+    // that just failed would be dispatched first on every subsequent turn, fail
+    // again, and make the reader watch the same switch over and over. While it cools
+    // the ranking decides, and the model returns to the head by itself once the
+    // cooldown clears - the pin is not forgotten, only deferred.
     if (pinned !== '' && pinned !== current.provider + '/' + current.model) {
       const at = ordered.findIndex(pair => pair.provider + '/' + pair.model === pinned)
-      if (at > 0) ordered.unshift(ordered.splice(at, 1)[0])
+      const pinnedStat = at > 0 ? statFor(pinned) : null
+      const pinnedCooling = pinnedStat !== null && pinnedStat.cooldownUntil > nowMs
+      if (at > 0 && !pinnedCooling) ordered.unshift(ordered.splice(at, 1)[0])
     }
 
     return ordered.slice(0, Math.min(cfg.maxCandidates, HARD_MAX_CANDIDATES))
@@ -1836,6 +1896,11 @@ export function apply(ctx, config = {}, runtime = {}) {
                 to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
                 reason: classifyFailureKind(String(lastFailure ?? '')),
               })
+              // The switch itself is the event worth persisting. Without this the
+              // counters above were written but the *decision* was not, so a restart
+              // showed the old model still in use and the switch looked like it had
+              // never happened.
+              scheduleStatsSave()
             }
           }
           return
@@ -1880,7 +1945,7 @@ export function apply(ctx, config = {}, runtime = {}) {
           // buries the provider's words under ours.
           if (!hostRefusal || trustedFailure) {
             stat.consecutiveFailures += 1
-            stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+            stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind, failedBecause)
           }
           // The error chunk is already in the consumer's hands, so the walk ends
           // here either way - and it must, because a fault of ours would repeat
@@ -1924,7 +1989,7 @@ export function apply(ctx, config = {}, runtime = {}) {
         // route stays fully available to the next turn.
         if (!hostRefusal || trustedFailure) {
           stat.consecutiveFailures += 1
-          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind, failedBecause)
         }
 
         // A fault of ours ends the walk. Every further candidate would hit the
@@ -2625,7 +2690,7 @@ export function apply(ctx, config = {}, runtime = {}) {
           const failedKind = classifyFailureKind(failure)
           stat.failures += 1
           stat.consecutiveFailures += 1
-          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind)
+          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind, failedBecause)
           stat.lastError = failure
           stat.lastErrorKind = failedKind
         }
