@@ -4,6 +4,9 @@
 
 User-visible changes, newest first. Commit hashes in brackets.
 
+## 0.2.4
+- **Docs**: adds this bilingual changelog, listed in the manifest and gated by release-check; the README and repository description were refreshed too. The npm package now carries the changelog with each release. Also fixes a crash in this gate: the SHA check fed a comment line to readFileSync, so the gate died with ENOENT and hid every other check behind it. [`fc14e99`]
+
 ## 0.2.3
 - **Fixed**: in the model-list search, a one-character term inside a multi-term query was almost unconstrained (25 of 36 characters matched some name; `a b` returned 264 and `d s` 528) — it is now anchored to the start of a word, while a lone `a` still searches the whole table as a substring. Measured: `a b` 264→2, `d s` 528→42, `flash a` 182→36, `ds fl` unchanged at 309. [`5aec752`]
 
