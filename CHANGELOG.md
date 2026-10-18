@@ -4,6 +4,11 @@
 
 User-visible changes, newest first. Commit hashes in brackets.
 
+## 0.2.14
+- **A pinned head that cannot be resolved is now reported as ignored.** Ordering only promotes the pinned pair when it is actually among the candidates and not cooling down, but the status line printed the raw string either way — so `pinned head: nonexistent/nope` read as if it were in effect. It now says `(not among the N candidates - ignored)` or `(cooling down - ignored for now)`.
+- Cleared a stray test value (`nonexistent/nope`) from this machine's config so the status no longer carries a fake head.
+- Suites: offline 194, client 102, settings 35, pin-cooling, release gate 23.
+
 ## 0.2.13
 - **Fixed: `model_rotator_benchmark` crashed whenever a probed model failed.** The benchmark's failure branch read a variable named `failedBecause` - the name the *walk* uses for its failure text - while the benchmark's own text lives in `failure`. Probing any unhealthy candidate therefore threw `ReferenceError: failedBecause is not defined` instead of reporting the failure, which is precisely the case the tool exists to measure. The value now comes from the local `failure`.
 - **Tests: registration is not execution.** The benchmark was asserted to *exist* in the registry and never once called, which is how the above shipped through 192 green assertions. `6b`/`6c` now call it on a failing candidate and require both the summary and the recorded `FAIL`; reverting the fix fails them at once.

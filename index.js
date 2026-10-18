@@ -2972,7 +2972,18 @@ export function apply(ctx, config = {}, runtime = {}) {
           ? 'disabled (a quota failure takes the ordinary backoff)'
           : 'until the next day at ' + String(cfg.quotaCooldownHour).padStart(2, '0')
             + ':00 local, at least ' + Math.round(cfg.quotaCooldownMs / 60000) + 'min'),
-        '  pinned head      : ' + (pinned === '' ? '(none)' : pinned),
+        '  pinned head      : ' + (() => {
+          if (pinned === '') return '(none)'
+          // The head is only reordered when the pinned pair exists and is not cooling
+          // down (see the ordering step). Saying a stale pin is "set" reads as if it
+          // were in effect, so an unresolvable one is reported as ignored.
+          const list = Array.isArray(pairs) ? pairs : []
+          const at = list.findIndex((pair) => pair.provider + '/' + pair.model === pinned)
+          if (at < 0) return pinned + ' (not among the ' + list.length + ' candidates - ignored)'
+          const stat = statFor(pinned)
+          const cooling = stat !== null && stat.cooldownUntil > Date.now()
+          return pinned + (cooling ? ' (cooling down - ignored for now)' : '')
+        })(),
         '  disabled models  : ' + (cfg.disabledModels.length === 0 ? '(none)' : cfg.disabledModels.join(', ')),
         '  disabled channels: ' + (cfg.disabledProviders.length === 0 ? '(none)' : cfg.disabledProviders.join(', ')),
         // Named here because the symptom is confusing: a model the user can see in
