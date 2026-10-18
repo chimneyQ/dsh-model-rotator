@@ -303,6 +303,15 @@ Every field has a safe default, so the plugin works with no file at all.
   n times this, capped at 10 s).
 - `preferSameModel` — rank the same model on another provider first, then close
   relatives, then the measured ranking (default `true`).
+- `windowGuard` — skip a failover candidate whose context window cannot hold
+  this conversation plus a reply (default `true`). The window comes from the
+  adapter that owns the route (`resolveModelInfo`), not from the catalog: a
+  profile may declare a window, but only the buyer fits the request. A route
+  whose adapter publishes no window is never skipped, a harness that cannot
+  report the conversation's pressure gets no guard at all, and a route on the
+  same window as the current one is exempt - the guard decides about *moving*.
+  A held-back candidate is reported as `window` in the model list, and the
+  status tool states the pressure it measured.
 - `noticeSwitch` — *also* post the one-line switch notice in the conversation
   (default `false`; the switch record is on the Model switches tab either way —
   see "Announcing a switch" above).

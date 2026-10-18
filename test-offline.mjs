@@ -46,11 +46,19 @@ function makeCtx(behaviour, seams, opts) {
     // The live-turn lookup the switch log files its records by. It stays absent
     // unless a scenario opts in through opts.liveAgent, so every scenario that
     // wants "no session could be determined" keeps getting exactly that.
+    //
+    // The window guard reads the conversation's pressure through the same
+    // session, so a scenario may declare pressure alone and still be answered.
     get: name => {
       const seam = seams?.[name]
       if (seam !== undefined) return seam
-      if (name === 'agents' && typeof opts?.liveAgent === 'function') {
-        return { currentInitiator: () => opts.liveAgent() }
+      if (name === 'agents' && (typeof opts?.liveAgent === 'function' || opts?.pressure !== undefined)) {
+        const live = typeof opts?.liveAgent === 'function' ? opts.liveAgent() : undefined
+        if (live !== undefined) return { currentInitiator: () => live }
+        return { currentInitiator: () => ({ session: { requestContext: () => ({ contextWindow: opts.pressure.window }) } }) }
+      }
+      if (name === 'tokenMeter' && opts?.pressure !== undefined) {
+        return { measure: () => ({ totalTokens: opts.pressure.tokens }) }
       }
       return undefined
     },
@@ -59,6 +67,18 @@ function makeCtx(behaviour, seams, opts) {
     llm: {
       listProviders: () => providers,
       registration: provider => ({ adapter: { listModels: async p => models[p] ?? [] } }),
+      // The window guard asks the buying adapters for their exact window. A
+      // scenario that does not declare windows gets none, which is exactly the
+      // "adapter does not publish a window" case the guard must leave alone.
+      resolveModelInfo: async (provider, model) => {
+        const declared = opts?.windows?.[provider + '/' + model]
+        return {
+          provider,
+          id: model,
+          name: model,
+          ...(declared === undefined ? {} : { context: { contextWindow: declared } }),
+        }
+      },
       stream(options) {
         attempted.push(options.provider + '/' + options.model)
         const emit = behaviour(options, attempted.length)
@@ -1621,6 +1641,95 @@ const quietHandle = (value) => ({
     if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
     else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg
   }
+}
+
+// ---- scenario 21: a route too small for this conversation is not a candidate --
+// The failure this guards against is not a broken provider: the route answers
+// fine, the conversation just does not fit in it. Switching there kills the
+// turn, and the compaction that could have shrunk the conversation cannot run
+// either, because the summary is requested on that same route.
+{
+  const quotaOnly = () => ([
+    { type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted 可用账号均受限' } } },
+  ])
+  // The default roster is what these fixtures budget against: provA/alpha and
+  // provA/beta on one channel, provB/gamma on the other. The small route is
+  // therefore provA/beta, and every window below is keyed to a route that
+  // actually exists - a guard test against a model the fixture never published
+  // would pass without the guard doing anything.
+  const fixtures = {
+    pressure: { tokens: 900000, window: 1000000 },
+    windows: { 'provA/alpha': 1000000, 'provA/beta': 262144, 'provB/gamma': 1000000 },
+  }
+
+  // 21a: a candidate that cannot hold the conversation is never dispatched.
+  const h = makeCtx(quotaOnly, undefined, fixtures)
+  apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const final = chunks.filter(c => c.type === 'finish').pop()
+  check('21a a candidate smaller than this conversation is not dispatched',
+    !h.attempted.includes('provA/beta') && h.attempted.includes('provB/gamma') && final?.reason?.kind === 'error',
+    'attempted=' + h.attempted.join(',') + ' finish=' + JSON.stringify(final?.reason))
+
+  // 21b: the control - same fixture, guard off, and the small route IS dialed.
+  const off = makeCtx(quotaOnly, undefined, fixtures)
+  apply(off.ctx, { retriesPerModel: 0, maxCandidates: 6, windowGuard: false }, {})
+  await collect(off.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('21b with the guard off the small route is dialed again',
+    off.attempted.includes('provA/beta'),
+    'attempted=' + off.attempted.join(','))
+
+  // 21c: a route whose adapter publishes no window must not be guessed about.
+  const silent = makeCtx(quotaOnly, undefined, {
+    pressure: fixtures.pressure,
+    windows: { 'provA/alpha': 1000000, 'provB/gamma': 1000000 },
+  })
+  apply(silent.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(silent.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('21c an unpublished window is not read as a small one',
+    silent.attempted.includes('provA/beta'),
+    'attempted=' + silent.attempted.join(','))
+
+  // 21d: with no measurable pressure the guard stands down entirely - a harness
+  // that cannot say how big the conversation is must not be second-guessed.
+  const blind = makeCtx(quotaOnly, undefined, { windows: fixtures.windows })
+  apply(blind.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(blind.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('21d without a pressure reading nothing is held back',
+    blind.attempted.includes('provA/beta'),
+    'attempted=' + blind.attempted.join(','))
+
+  // 21e: a route on the same window as the one this conversation already runs
+  // on is exempt. The guard decides about *moving*, so a route that offers
+  // exactly the room the turn already had is not a reason to leave the model.
+  const here = makeCtx(quotaOnly, undefined, {
+    pressure: { tokens: 900000, window: 262144 },
+    windows: { 'provA/alpha': 262144, 'provA/beta': 262144, 'provB/gamma': 1000000 },
+  })
+  apply(here.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  await collect(here.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('21e a route on the current window is not blocked by the guard',
+    here.attempted.includes('provA/beta'),
+    'attempted=' + here.attempted.join(','))
+
+  // 21f: the model list names the reason, so a row held back for size is not
+  // read as a verdict on the model itself.
+  const list = makeCtx(quotaOnly, undefined, { ...fixtures, route: true })
+  apply(list.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+  const models = await list.request('GET', undefined, '/_dsh/model-rotator/models', 0)
+  // The route reports the same flattened row list the settings page renders.
+  const rows = models.payload?.models ?? []
+  const beta = rows.find(row => row.key === 'provA/beta')
+  const gamma = rows.find(row => row.key === 'provB/gamma')
+  check('21f the list reports the window as the reason',
+    beta?.reason === 'window' && beta?.inRotation === false && gamma?.reason === '',
+    'beta=' + JSON.stringify(beta && { reason: beta.reason, inRotation: beta.inRotation }) + ' gamma=' + JSON.stringify(gamma && gamma.reason))
+
+  // 21g: the report says the guard exists and what it measured.
+  const report = await h.registered.get('model_rotator_status').execute({}, {})
+  check('21g the status report states the guard and the pressure it used',
+    /window guard/.test(report) && /pressure 900000 tokens/.test(report),
+    report.split('\n').filter(line => /window guard/.test(line)).join(' | ').slice(0, 240))
 }
 
 const failed = results.filter(r => r[0] === 'FAIL')

@@ -100,6 +100,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
   retryBackoffMs: 300,
   preferSameModel: true,
   noticeSwitch: false,
+  windowGuard: true,
   disabledModels: [],
   quotaCooldownMs: 12 * 60 * 60 * 1000,
   quotaCooldownHour: 0,
@@ -273,6 +274,7 @@ const PAGE_KEYS = [
   'retryBackoffMs',
   'preferSameModel',
   'noticeSwitch',
+  'windowGuard',
 ]
 
 /** Combo routes (virtual catalog rows) are never a candidate body. */
@@ -428,6 +430,18 @@ const FAMILY_CHANNELS_MAX = 2
 const HARD_MAX_RETRIES = 5
 
 /**
+ * Space a candidate's context window must leave for the reply of the turn that
+ * is being moved onto it.
+ *
+ * A route can be perfectly healthy and still be the wrong place to continue a
+ * conversation: the harness kills the turn when the request does not fit, and a
+ * compaction that would shrink it cannot run either, because the summarizer is
+ * asked on the same route. The guard therefore refuses a candidate whose window
+ * cannot hold the conversation as it currently stands plus this reserve.
+ */
+const WINDOW_RESERVE_TOKENS = 32768
+
+/**
  * The plugin's settings schema.
  *
  * Only fields marked .volatile() reach the generated settings page; the host's
@@ -482,6 +496,8 @@ export const Config = z === undefined ? undefined : z.object({
     .description('Rank the same model on another provider - or a close relative - ahead of unrelated models.'),
   noticeSwitch: z.boolean().default(SETTINGS_DEFAULTS.noticeSwitch).volatile()
     .description('Post one line in the conversation when a turn is answered by a different model than the one asked for (a notice, not a message).'),
+  windowGuard: z.boolean().default(SETTINGS_DEFAULTS.windowGuard).volatile()
+    .description('Skip candidates whose context window cannot hold this conversation plus a reply. A model that is too small for the request would have killed the turn, and the compaction that could have shrunk it cannot run on that route either.'),
   weights: z.object({
     connectivity: z.number().min(0).default(SETTINGS_DEFAULTS.weights.connectivity).volatile()
       .description('Ranking weight for the measured success rate.'),
@@ -598,6 +614,7 @@ function normalizeConfig(raw) {
     ),
     retryBackoffMs: Math.min(Math.max(numberOr(raw.retryBackoffMs, base.retryBackoffMs), 0), 60000),
     preferSameModel: raw.preferSameModel !== false,
+    windowGuard: raw.windowGuard !== false,
     // Unlike the two above, this one defaults to off: the switch record lives on
     // the conversation's switch tab now, and the in-conversation row is the
     // opt-in for a reader who wants it in the transcript as well.
@@ -1096,6 +1113,7 @@ export function apply(ctx, config = {}, runtime = {}) {
       retryBackoffMs: readSetting(source.retryBackoffMs, undefined),
       preferSameModel: readSetting(source.preferSameModel, undefined),
       noticeSwitch: readSetting(source.noticeSwitch, undefined),
+      windowGuard: readSetting(source.windowGuard, undefined),
       weights: {
         connectivity: readSetting(nested.connectivity, undefined),
         speed: readSetting(nested.speed, undefined),
@@ -1538,11 +1556,124 @@ export function apply(ctx, config = {}, runtime = {}) {
     if (looksNonChat(pair.model, patternCache, pair.provider)) return 'non-chat'
     const full = pair.provider + '/' + pair.model
     if (cfg.excludeModels.includes(full) || cfg.excludeModels.includes(pair.model)) return 'excluded'
+    // The context-window guard is listed last because it is the only reason that
+    // depends on *this* conversation rather than on the model: a row kept out
+    // because it is too small for the pressure right now is a perfectly usable
+    // model for a fresh conversation, and saying so is what keeps the list from
+    // reading like a verdict.
+    if (rejectedByWindow(pair, cfg)) return 'window'
     return ''
   }
 
   function isExcluded(pair, cfg) {
     return exclusionReason(pair, cfg) !== ''
+  }
+
+  /**
+   * True when this pair cannot hold the conversation as it stands right now.
+   *
+   * The answer comes from the pressure measured before the walk plus the window
+   * every candidate resolves to, and it is read from a short-lived cache: the
+   * model list asks per row, so resolving each route on every row would put
+   * hundreds of adapter calls behind one page load.
+   *
+   * Nothing is rejected on a number the plugin does not have. A route whose
+   * adapter does not publish a window is a route the plugin cannot reason about,
+   * and refusing it on a guess would cost the user models that work.
+   */
+  function rejectedByWindow(pair, cfg) {
+    if (cfg.windowGuard !== true) return false
+    const pressure = windowPressure()
+    if (pressure === null) return false
+    const window = windowCache.get(pair.provider + '/' + pair.model)
+    if (typeof window !== 'number' || window <= 0) return false
+    // The route in use is exempt: a turn already answering on it is not moved
+    // because a guard would have preferred another model.
+    if (window === pressure.currentWindow) return false
+    return window < pressure.tokens + WINDOW_RESERVE_TOKENS
+  }
+
+
+  /**
+   * The token pressure of the conversation the walk is serving, or null.
+   *
+   * Read through the two surfaces the host already publishes: the token meter
+   * prices the current surface, and the session's own request context carries
+   * the window the current route was given. Both are optional - a harness
+   * without either one gets no guard rather than a wrong one - and both are
+   * read inside the turn's initiator scope, which is where the walk runs.
+   */
+  function conversationPressure() {
+    let session = null
+    try { session = ctx.get?.('agents')?.currentInitiator?.()?.session ?? null } catch { session = null }
+    if (session === null || session === undefined) return null
+    let tokens = null
+    try { tokens = Number(ctx.get?.('tokenMeter')?.measure(session)?.totalTokens) } catch { tokens = null }
+    if (tokens === null || !Number.isFinite(tokens) || tokens <= 0) return null
+    const window = Number(session.requestContext?.()?.contextWindow)
+    return { tokens, currentWindow: Number.isFinite(window) && window > 0 ? window : 0 }
+  }
+
+  /**
+   * The conversation's pressure once per walk, then remembered for the page.
+   *
+   * `measure()` is cheap but not free, and the model list asks about every
+   * discovered row; the reading is also stable for the seconds a page load or a
+   * candidate ranking takes. It expires quickly so a stale figure cannot keep a
+   * model out after the conversation has been compacted.
+   */
+  const PRESSURE_TTL_MS = 30_000
+  let pressureCache = { at: 0, value: null }
+  function windowPressure() {
+    const now = Date.now()
+    if (now - pressureCache.at < PRESSURE_TTL_MS) return pressureCache.value
+    let value = null
+    try { value = conversationPressure() } catch { value = null }
+    pressureCache = { at: now, value }
+    return value
+  }
+
+  /** Window per "provider/model", refreshed by the walk before it ranks. */
+  const windowCache = new Map()
+
+  /**
+   * Resolve the windows of the routes about to be ranked, in parallel.
+   *
+   * Only the routes that could actually be dispatched are asked about: a row the
+   * config already excludes is not a candidate, so its window is nobody's
+   * business, and asking would turn one page load into a sweep of every
+   * provider on the machine.
+   */
+  async function refreshWindowCache(pairs, cfg) {
+    if (cfg.windowGuard !== true) return
+    const pressure = windowPressure()
+    if (pressure === null) return
+    const wanted = pairs.filter(pair => !isExcluded(pair, cfg))
+    await Promise.all(wanted.map(async pair => {
+      const key = pair.provider + '/' + pair.model
+      const window = await windowOf(pair)
+      windowCache.set(key, window)
+    }))
+  }
+
+  /**
+   * The context window of one route, or 0 when the adapter does not say.
+   *
+   * `resolveModelInfo` is the buying authority: it asks the adapter that owns
+   * the exact provider/model route, which is the side that has to fit the
+   * request. A profile may declare a window, but a declaration is not a
+   * dispatch, and an adapter that stays silent must not be treated as small.
+   */
+  async function windowOf(pair) {
+    const llm = llmRef()
+    if (typeof llm?.resolveModelInfo !== 'function') return 0
+    try {
+      const info = await llm.resolveModelInfo(pair.provider, pair.model)
+      const window = Number(info?.context?.contextWindow)
+      return Number.isFinite(window) && window > 0 ? window : 0
+    } catch {
+      return 0
+    }
   }
 
   /**
@@ -1559,6 +1690,10 @@ export function apply(ctx, config = {}, runtime = {}) {
     const current = { provider: String(options.provider ?? ''), model: String(options.model ?? '') }
     const nowMs = Date.now()
     const pairs = await discoverPairs()
+    // The window of every unexcluded route is resolved before the ranking, not
+    // per row: the guard has to be able to answer for the whole roster by the
+    // time the walk starts, and a page load must not wait on it row by row.
+    try { await refreshWindowCache(pairs, cfg) } catch { /* a guard that cannot read a window simply does not guard */ }
     const seen = new Set([current.provider + '/' + current.model])
     const ranked = []
     for (const pair of pairs) {
@@ -2564,6 +2699,7 @@ export function apply(ctx, config = {}, runtime = {}) {
     { key: 'retryBackoffMs', path: 'retryBackoffMs', read: cfg => cfg.retryBackoffMs },
     { key: 'preferSameModel', path: 'preferSameModel', read: cfg => cfg.preferSameModel },
     { key: 'noticeSwitch', path: 'noticeSwitch', read: cfg => cfg.noticeSwitch },
+    { key: 'windowGuard', path: 'windowGuard', read: cfg => cfg.windowGuard },
     { key: 'weights.connectivity', path: 'weights.connectivity', read: cfg => cfg.weights.connectivity },
     { key: 'weights.speed', path: 'weights.speed', read: cfg => cfg.weights.speed },
     { key: 'disabledModels', path: 'disabledModels', read: cfg => (cfg.disabledModels.length === 0 ? '(none)' : cfg.disabledModels.length + ' entry') },
@@ -2601,6 +2737,10 @@ export function apply(ctx, config = {}, runtime = {}) {
   async function modelListReport() {
     hydrateStats()
     const cfg = currentConfig()
+    // The page names the reason a row is out of rotation, and "too small for
+    // this conversation" is one of them: the windows are resolved here so the
+    // reason column can be answered rather than left blank.
+    try { await refreshWindowCache(await discoverPairs(), cfg) } catch { /* no windows, no window reason */ }
     const all = await discoverPairs()
     const nowMs = Date.now()
     const rows = []
@@ -2767,6 +2907,20 @@ export function apply(ctx, config = {}, runtime = {}) {
     return headerConfig.provider + '/' + headerConfig.model + effort
   }
 
+  /**
+   * How many routes the guard is holding back, for the status line.
+   *
+   * The count is read from the same cache the list and the walk fill, so the
+   * report describes the state the user is actually in rather than a fresh scan.
+   */
+  function skippedForWindow() {
+    let held = 0
+    for (const window of windowCache.values()) {
+      if (typeof window === 'number' && window > 0 && window < (windowPressure()?.tokens ?? 0) + WINDOW_RESERVE_TOKENS) held += 1
+    }
+    return held === 0 ? 'nothing held back right now' : held + ' route(s) held back for this conversation'
+  }
+
   /** Whether the session-local model switch seam is mounted in this host. */
   function sessionSwitchLine() {
     return sessionAgentController() !== undefined
@@ -2830,6 +2984,16 @@ export function apply(ctx, config = {}, runtime = {}) {
         '  model list route : ' + MODELS_PATH + ' (GET the grouped list; POST {key, enabled} to switch one off or on)',
         '  switch log route : ' + SWITCHES_PATH + ' (GET ?session=<id>&limit=<n> for the conversation tab)',
         '  image failover   : ' + (cfg.allowImageFailover ? 'allowed' : 'skipped (text-only turns only)'),
+        // The guard is the one rule that can explain "a healthy model is missing
+        // from the walk", and the number it acted on is the part a user cannot
+        // see anywhere else: the conversation's own pressure next to the window
+        // every candidate resolved to.
+        '  window guard     : ' + (cfg.windowGuard
+          ? (windowPressure() === null
+            ? 'on; this conversation has no measurable pressure yet, so nothing is skipped'
+            : 'on; pressure ' + windowPressure().tokens + ' tokens, a candidate must hold pressure + '
+              + WINDOW_RESERVE_TOKENS + ' (' + skippedForWindow() + ')')
+          : 'off; every discovered model is a candidate regardless of size'),
         '  switch confirm   : ' + (cfg.confirmSwitch
           ? 'ask first; switches on confirm or after ' + cfg.confirmTimeoutMs + 'ms, never on decline'
           : 'no prompt; switches immediately'),

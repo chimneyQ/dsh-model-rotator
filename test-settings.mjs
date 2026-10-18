@@ -58,13 +58,14 @@ check('1a Config is exported (page exists at all)', Config !== undefined && type
 const form = volatileForm(new z(Config.toJSON()))
 check('1b volatileForm keeps the schema', form !== undefined)
 const kept = Object.keys(form?.dict ?? {}).sort()
-check('1c exactly the intended top-level fields', JSON.stringify(kept) === JSON.stringify(['adoptSwitchedModel', 'allowImageFailover', 'confirmSwitch', 'confirmTimeoutMs', 'cooldownBaseMs', 'enabled', 'maxCandidates', 'maxCooldownMs', 'noticeSwitch', 'preferSameModel', 'quotaCooldownHour', 'quotaCooldownMs', 'retriesPerModel', 'retryBackoffMs', 'statsPersistTtlMs', 'weights']), kept.join(','))
+check('1c exactly the intended top-level fields', JSON.stringify(kept) === JSON.stringify(['adoptSwitchedModel', 'allowImageFailover', 'confirmSwitch', 'confirmTimeoutMs', 'cooldownBaseMs', 'enabled', 'maxCandidates', 'maxCooldownMs', 'noticeSwitch', 'preferSameModel', 'quotaCooldownHour', 'quotaCooldownMs', 'retriesPerModel', 'retryBackoffMs', 'statsPersistTtlMs', 'weights', 'windowGuard']), kept.join(','))
 const weightKeys = Object.keys(form?.dict?.weights?.dict ?? {}).sort()
 check('1d weights exposes its two leaves as fields', JSON.stringify(weightKeys) === JSON.stringify(['connectivity', 'speed']), weightKeys.join(','))
 check('1e the walk leaves each kept leaf a usable schema', form?.dict?.weights?.dict?.connectivity?.type === 'number' && form?.dict?.enabled?.type === 'boolean', 'leaf=' + String(form?.dict?.weights?.dict?.connectivity?.type))
 check('1g the consent fields survive as boolean and number', form?.dict?.confirmSwitch?.type === 'boolean' && form?.dict?.confirmTimeoutMs?.type === 'number', 'switch=' + String(form?.dict?.confirmSwitch?.type) + ' timeout=' + String(form?.dict?.confirmTimeoutMs?.type))
 check('1h the session-adoption field is a boolean switch', form?.dict?.adoptSwitchedModel?.type === 'boolean', 'adopt=' + String(form?.dict?.adoptSwitchedModel?.type))
 check('1i the switch-notice field is a boolean switch', form?.dict?.noticeSwitch?.type === 'boolean', 'notice=' + String(form?.dict?.noticeSwitch?.type))
+check('1j the context-window guard is a boolean switch on the page', form?.dict?.windowGuard?.type === 'boolean', 'guard=' + String(form?.dict?.windowGuard?.type))
 
 // control: a plain sibling must be dropped by the same walk
 {
