@@ -906,6 +906,39 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     fb2.harness.dispose()
   }
 
+  // -- the Host injects the conversation id; that is the primary source ----------
+  // The built-in chat and trajectory tabs get their session id from the cell's own
+  // props, through the registration's `inject: (sessionId) => ({sessionId})`. 0.2.9
+  // read it off a sessions-list field no Host store ever carried, so the tab could
+  // not tell which conversation it was in and always degraded to the whole log.
+  {
+    const inj = boot('absent')
+    const injTab = tabOf(inj)
+    check('6j the tab declares the session-inject contract',
+      injTab !== undefined && typeof injTab.definition.inject === 'function'
+        && injTab.definition.inject('sess-9').sessionId === 'sess-9',
+      injTab === undefined ? 'no tab' : typeof injTab.definition.inject)
+    urls = []
+    payloads.push(sample)
+    const injNodes = await inj.harness.settle(injTab.Component, { sessionId: 'sess-9' })
+    check('6k an injected id is asked for by name, not mediated by a service',
+      urls.length === 1 && urls[0].includes('&session=sess-9') && rowsOf(injNodes).length === 2,
+      urls.join(',') + ' rows=' + rowsOf(injNodes).length)
+    inj.harness.dispose()
+
+    // The injected id wins over a service that reports something else: a stale
+    // 'current' must not relabel the conversation the reader is actually in.
+    const both = boot('present')
+    const bothTab = tabOf(both)
+    urls = []
+    payloads.push(sample)
+    await both.harness.settle(bothTab.Component, { sessionId: 'sess-9' })
+    check('6l the injected id outranks a service-reported one',
+      urls.length === 1 && urls[0].includes('&session=sess-9') && !urls[0].includes('sess-1'),
+      urls.join(','))
+    both.harness.dispose()
+  }
+
   // -- the copy stays paired ----------------------------------------------------
   const zh = absent.dictionaries[absent.mod.NS].zh
   const en = absent.dictionaries[absent.mod.NS].en

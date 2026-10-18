@@ -978,20 +978,32 @@ window.__ModuleLoader__.load({
      * best-effort id. An unknown id degrades to the unfiltered log (every
      * conversation), which is why this answers "" instead of throwing.
      */
-    function currentSessionId(ctx) {
+    function currentSessionId(ctx, props) {
+      // The Host injects the conversation id into this cell's props (the same
+      // contract the built-in chat and trajectory tabs register). That is the
+      // primary source: reading it off the sessions *list* cannot work, because
+      // that store exposes ids/byId/phase/projectionsBySession and has no
+      // "current" field - 0.2.9 read one that never existed and therefore always
+      // fell back to the unfiltered log.
+      const injected = props === null || props === undefined ? "" : props.sessionId;
+      if (typeof injected === "string" && injected.trim() !== "") return injected.trim();
+      // Best-effort fallback for a Host that did not inject one: some builds do
+      // carry a current/conversation binding. Unknown stays "" (every session),
+      // which the load path turns into a visible fallback, never a silent empty.
       try {
         const sessions = (ctx.get?.("sessions")) ?? ctx.sessions;
-        if (sessions === null || sessions === undefined) return "";
-        const list = sessions.list;
-        if (list === null || list === undefined || typeof list.getSnapshot !== "function") return "";
-        const snapshot = list.getSnapshot();
-        if (snapshot === null || snapshot === undefined) return "";
-        const current = snapshot.current;
-        if (current === undefined || current === null) return "";
-        return String(current);
+        const primary = (ctx.get?.("uiSession")) ?? ctx.uiSession;
+        const candidates = [primary?.current, primary?.adapter?.current, sessions?.current, sessions?.list?.getSnapshot?.()?.current, sessions?.list?.getSnapshot?.()?.key];
+        for (const candidate of candidates) {
+          const value = typeof candidate === "function" ? undefined : candidate;
+          const read = value !== null && typeof value === "object" && typeof value.getSnapshot === "function" ? value.getSnapshot() : value;
+          const id = typeof read === "string" ? read : (read !== null && typeof read === "object" ? (read.key ?? read.id ?? read.sessionId) : "");
+          if (typeof id === "string" && id.trim() !== "") return id.trim();
+        }
       } catch (error) {
         return "";
       }
+      return "";
     }
 
     /** One endpoint as text: the host's own label when it sent one, else "provider/model". */
@@ -1037,10 +1049,10 @@ window.__ModuleLoader__.load({
      */
     function makeSwitchLogView(ctx, t) {
       /** Time, from -> to, and why - one row per automatic switch. */
-      return function SwitchLogView() {
+      return function SwitchLogView(props) {
         const [state, setState] = React.useState({ status: "loading", entries: [], total: 0, error: "", session: "", scope: "session" });
         const load = React.useCallback(() => {
-          const session = currentSessionId(ctx);
+          const session = currentSessionId(ctx, props);
           const query = "?limit=" + SWITCHES_LIMIT + (session === "" ? "" : "&session=" + encodeURIComponent(session));
           const read = (url) => fetch(url, { headers: { accept: "application/json" } })
             .then((response) => response.json().catch(() => null).then((payload) => {
@@ -1297,15 +1309,17 @@ window.__ModuleLoader__.load({
       ctx.slots.inject("settings.section", () => ctx.slots.register(definition("settings.section", 20), ModelRotatorCard));
       ctx.slots.inject("plugins.item", () => ctx.slots.register(definition("plugins.item", 45), ModelRotatorCard));
       // The tabs this one sits between: 记忆 is 78, 白板看板 is 80, 白板画布 is 81.
-      // No `inject` here: this cell renders a view, not a settings form, so it has no
-      // staged fields to hand the host. The session id the tab needs is read at
-      // request time (see currentSessionId) instead of being injected as a service.
+      // `inject` hands this cell the conversation id the Host is rendering - the
+      // contract the built-in chat and trajectory tabs register (`inject:
+      // (sessionId) => ({...})`). 0.2.10 read the id off a sessions-list field that
+      // does not exist, so the tab could never tell which conversation it was in.
       ctx.slots.inject("conversation.view", () => ctx.slots.register({
         name: "conversation.view",
         id: "model-rotator-switches",
         order: 79,
         label: () => t("switches.tab"),
-        locale: NS
+        locale: NS,
+        inject: (sessionId) => ({ sessionId: sessionId })
       }, makeSwitchLogView(ctx, t)));
     }
     //#endregion

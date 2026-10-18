@@ -37,7 +37,7 @@
 14:07:31  modelscope/deepseek-ai/DeepSeek-V4.1-Flash → trae/deepseek-v4.1-flash   (quota)
 ```
 
-页签的数据来自插件自己的记录（`GET /_dsh/model-rotator/switches?session=<会话 id>`），**不占用对话上下文**。记录按会话归属：宿主不向插件路由注入会话，所以会话 id 在**切换发生处**当场取定（`ctx.get('agents').currentInitiator()` 返回发起该次调用的 agent），而不是等轮次边界——边界是进程级的，谁能停轮次谁就能把别人的记录整批带走。若某次调用确实没有活动轮次（插件路由、宿主未挂 `agents`），记录照写、会话留空，空会话只在「全量视图」里可见。
+页签的数据来自插件自己的记录（`GET /_dsh/model-rotator/switches?session=<会话 id>`），**不占用对话上下文**。页签所在的会话由宿主注入：注册时声明 `inject: (sessionId) => ({ sessionId })`，组件从 `props.sessionId` 取——与内置的 对话 / 轨迹 页签同一条契约（0.2.11 前这里读的是 `sessions.list` 上一个并不存在的字段，页签因此认不出自己在哪个对话里）。记录按会话归属：宿主不向插件路由注入会话，所以会话 id 在**切换发生处**当场取定（`ctx.get('agents').currentInitiator()` 返回发起该次调用的 agent），而不是等轮次边界——边界是进程级的，谁能停轮次谁就能把别人的记录整批带走。若某次调用确实没有活动轮次（插件路由、宿主未挂 `agents`），记录照写、会话留空，空会话只在「全量视图」里可见。
 
 当本对话名下一条记录都没有、而记录总数不为零时，页签会改为展示**全部会话**的记录，并配一行提示说明这是回退视图——避免「有历史却显示空」。
 

@@ -82,7 +82,11 @@ why:
 
 The tab reads the plugin's own record
 (`GET /_dsh/model-rotator/switches?session=<id>`), so a switch costs **no
-conversation context**. Records are filed per conversation, and the session is
+conversation context**. The conversation it belongs to is **injected by the Host**
+— the cell registers `inject: (sessionId) => ({ sessionId })` and reads
+`props.sessionId`, the same contract the built-in 对话 and 轨迹 tabs use (before
+0.2.11 it read a field the Host never had, so the tab could not tell which
+conversation it was in). Records are filed per conversation, and the session is
 bound **where the switch happens** — `ctx.get('agents').currentInitiator()` answers
 with the agent that started the call — rather than at the turn boundary, which is
 process-wide: whichever conversation stops a turn next would otherwise drain the
