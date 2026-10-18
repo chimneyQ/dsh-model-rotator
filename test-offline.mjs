@@ -298,6 +298,14 @@ const collect = async stream => {
   apply(h.ctx, { enabled: false }, {})
   // note: config comes from file, so force via env var later; here assert registration only
   check('6a tools registered', h.registered.has('model_rotator_status') && h.registered.has('model_rotator_benchmark') && h.registered.has('model_rotator_select'), [...h.registered.keys()].join(','))
+
+  // Registration is not execution. Counting the tool in the registry said nothing
+  // about whether it runs, and a benchmark that threw ReferenceError on its own
+  // failure branch shipped through 192 green assertions because of it.
+  const bench = h.registered.get('model_rotator_benchmark')
+  const benchFail = await bench.execute({ limit: 1, prompt: 'x', timeoutMs: 5000 }, {})
+  check('6b benchmark survives a failing candidate', typeof benchFail === 'string' && benchFail.includes('Probed'), String(benchFail).slice(0, 120))
+  check('6c the failure was recorded, not swallowed', typeof benchFail === 'string' && benchFail.includes('FAIL'), String(benchFail).slice(0, 120))
 }
 
 // ---- scenario 9: ask before leaving a failed model ----------------------------

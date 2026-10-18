@@ -3113,7 +3113,9 @@ export function apply(ctx, config = {}, runtime = {}) {
           const failedKind = classifyFailureKind(failure)
           stat.failures += 1
           stat.consecutiveFailures += 1
-          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind, failedBecause)
+          // The benchmark has no walk: the failure text it holds is the whole story,
+          // and there is no earlier candidate's error to fall back to.
+          stat.cooldownUntil = cooldownUntilFor(stat, cfg, Date.now(), failedKind, failure)
           stat.lastError = failure
           stat.lastErrorKind = failedKind
         }
