@@ -1981,15 +1981,37 @@ export function apply(ctx, config = {}, runtime = {}) {
           // switch tab reads, and a reader who turned the in-conversation row off
           // still wants the history. Whether a row is *also* steered into the
           // conversation is decided at the turn boundary (see the notice
-          // listener), which is also where the session becomes known - a plugin
-          // route never gets one.
+          // listener); the *record*, though, is filed right here so its session
+          // is the one the dispatch ran under - a plugin route never gets one.
           if (index > 0) {
-            // One notice per *distinct* destination per turn. The same model on
-            // another channel is a legitimate switch the first time it is
-            // announced; announcing it again for the next sibling channel is what
-            // makes the reader see "switched to the same model" twice. A family
-            // is named by its model id, which is exactly the part the reader
-            // recognises.
+            // The record is written HERE, not at the turn boundary. A switch that
+            // is only queued until some turn stops is not yet recorded, and the
+            // queue is process-wide: a conversation that never stops a turn would
+            // leave its switch in the queue for another conversation's boundary to
+            // flush - filed against the wrong session (or lost entirely). Filing it
+            // now pins the session the dispatch ran under, which is the only moment
+            // this code both sees the switch and can name its conversation.
+            appendSwitchLog({
+              // The same provenance rule as the notice below: "from" is the model
+              // the turn was dispatched with, and the reason is that model's own
+              // failure, not the last candidate's.
+              from: {
+                provider: String(options.provider ?? ''),
+                model: String(options.model ?? ''),
+                displayName: displayNameOf(String(options.provider ?? '')),
+              },
+              to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
+              reason: classifyFailureKind(String(startFailure ?? lastFailure ?? '')),
+              at: Date.now(),
+              purpose: String(options.purpose ?? ''),
+              session: currentSessionForLog(),
+            })
+            // The in-conversation row is still one per *distinct* destination per
+            // turn. The same model on another channel is a legitimate switch the
+            // first time it is announced; announcing it again for the next sibling
+            // channel is what makes the reader see "switched to the same model"
+            // twice. A family is named by its model id, which is exactly the part
+            // the reader recognises.
             const alreadyNamed = noticeQueue.some(entry => entry.to.model === pair.model)
             if (!alreadyNamed) {
               noticeQueue.push({
@@ -2203,7 +2225,9 @@ export function apply(ctx, config = {}, runtime = {}) {
    *
    * A switch is otherwise silent - the reply simply arrives from somewhere else -
    * so the walk records that it changed the model, and the turn boundary turns
-   * that record into one visible line. The delivery goes through
+   * that *queued notice* into one visible line. (The record itself is written,
+   * and its session pinned, back in the walk - see appendSwitchLog.) The
+   * delivery goes through
    * ctx.on('agent/turn-stopping') and agent.steer(): "steer" is the host's own way
    * of adding a message to the running conversation, so the notice is a normal,
    * durable, replayable entry (a user/message) rather than a private event type -
@@ -2220,6 +2244,33 @@ export function apply(ctx, config = {}, runtime = {}) {
   const appendSwitchLog = entry => {
     switchLog.push(entry)
     if (switchLog.length > SWITCH_LOG_MAX) switchLog.splice(0, switchLog.length - SWITCH_LOG_MAX)
+  }
+  /**
+   * The session whose conversation is on screen right now, or "" when there is none.
+   *
+   * The record has to be filed where the switch happens. Reading the session at the
+   * *turn boundary* instead - which is what this plugin used to do - is too late:
+   * both the pending queue and the log are process-wide, so a conversation whose
+   * turn never stops keeps waiting in that queue and its switch is written out
+   * under whichever *other* conversation stops a turn next. That is exactly the
+   * reported symptom: session A's switch filed against session B, and A's own tab
+   * then showing "no model switches in this conversation".
+   *
+   * currentInitiator() is the same seam adoptServedModel() already trusts, and an
+   * llm/stream dispatch runs inside the initiating turn's scope, so it resolves to
+   * the agent that started the call. A plugin route has no session and so answers
+   * "" - which the log treats as "every session", never as a crash.
+   */
+  const currentSessionForLog = () => {
+    let registry
+    try { registry = ctx.get?.('agents') } catch { return '' }
+    if (registry === undefined || registry === null) return ''
+    if (typeof registry.currentInitiator !== 'function') return ''
+    let agent
+    try { agent = registry.currentInitiator() } catch { return '' }
+    if (agent === undefined || agent === null) return ''
+    const id = agent.session === undefined || agent.session === null ? undefined : agent.session.id
+    return id === undefined || id === null ? '' : String(id)
   }
   /**
    * The label the reader recognises.
@@ -2256,28 +2307,20 @@ export function apply(ctx, config = {}, runtime = {}) {
     try {
       ctx.on('agent/turn-stopping', ({ agent, signal }) => {
         if (noticeQueue.length === 0) return
-        // A subagent transcript is somebody else's log. Both the row and the
-        // record belong to the root conversation, and the queue must survive for
-        // it: consuming it here - which is what used to happen - is how a root
-        // conversation's switch went unannounced.
+        // A subagent transcript is somebody else's log. The row belongs to the
+        // root conversation, and the queue must survive for it: consuming it here
+        // - which is what used to happen - is how a root conversation's switch
+        // went unannounced. (The switch *record* no longer depends on this
+        // boundary at all; it was filed where the switch happened.)
         if (agent?.session?.header?.parentSession !== undefined) return
         const pending = noticeQueue.splice(0, noticeQueue.length)
-        // The session is known only here: the host does not hand one to a plugin
-        // route, and the llm/stream seam does not carry one. This boundary is the
-        // one place that both sees the switch and knows whose conversation it was.
-        const sessionId = String(agent?.session?.id ?? '')
-        for (const entry of pending) {
-          appendSwitchLog({
-            at: entry.at ?? Date.now(),
-            session: sessionId,
-            purpose: entry.purpose ?? '',
-            reason: entry.reason ?? '',
-            from: entry.from,
-            to: entry.to,
-          })
-        }
-        // The in-conversation row is opt-in. The record above is what the tab
-        // reads, so turning the row off loses nothing.
+        // The drain stays: this queue is now only the *optional* in-conversation
+        // row, and anything not steered below is simply dropped. The record itself
+        // was already written where the switch happened (see the llm/stream walk),
+        // so nothing is lost by this boundary, and nothing depends on it either.
+        //
+        // The in-conversation row is opt-in. The record is what the tab reads, so
+        // turning the row off loses nothing.
         if (currentConfig().noticeSwitch !== true) return
         if (signal?.aborted === true) return
         for (const notice of pending) {

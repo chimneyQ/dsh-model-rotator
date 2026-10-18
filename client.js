@@ -115,6 +115,7 @@ window.__ModuleLoader__.load({
       "switches.loading": "读取中…",
       "switches.failed": "读取切换记录失败：",
       "switches.allSessions": "未识别当前对话，下面是所有会话的切换记录。",
+      "switches.fallback": "这个对话名下暂时没有记录，下面是所有会话的切换记录。",
       "switches.purpose.compaction": "上下文压缩触发",
       "switches.reason.quota": "额度耗尽",
       "switches.reason.network": "网络错误",
@@ -227,6 +228,7 @@ window.__ModuleLoader__.load({
       "switches.loading": "Loading…",
       "switches.failed": "Could not read the switch log: ",
       "switches.allSessions": "Current conversation not identified; showing switches from every conversation.",
+      "switches.fallback": "No switches are recorded under this conversation yet; showing switches from every conversation.",
       "switches.purpose.compaction": "context compaction",
       "switches.reason.quota": "quota exhausted",
       "switches.reason.network": "network error",
@@ -1036,20 +1038,44 @@ window.__ModuleLoader__.load({
     function makeSwitchLogView(ctx, t) {
       /** Time, from -> to, and why - one row per automatic switch. */
       return function SwitchLogView() {
-        const [state, setState] = React.useState({ status: "loading", entries: [], total: 0, error: "", session: "" });
+        const [state, setState] = React.useState({ status: "loading", entries: [], total: 0, error: "", session: "", scope: "session" });
         const load = React.useCallback(() => {
           const session = currentSessionId(ctx);
           const query = "?limit=" + SWITCHES_LIMIT + (session === "" ? "" : "&session=" + encodeURIComponent(session));
-          return fetch(SWITCHES_PATH + query, { headers: { accept: "application/json" } })
-            .then((response) => response.json().catch(() => null).then((payload) => ({ response, payload })))
-            .then(({ response, payload }) => {
+          const read = (url) => fetch(url, { headers: { accept: "application/json" } })
+            .then((response) => response.json().catch(() => null).then((payload) => {
               if (!response.ok) throw new Error((payload && payload.error) || ("HTTP " + response.status));
               const entries = payload !== null && Array.isArray(payload.entries) ? payload.entries : [];
               const total = payload !== null && Number.isFinite(Number(payload.total)) ? Number(payload.total) : entries.length;
-              setState({ status: "ready", entries: entries, total: total, error: "", session: session });
+              return { entries: entries, total: total };
+            }));
+          return read(SWITCHES_PATH + query)
+            .then((fresh) => {
+              // A record can outlive the fix that made conversation id reliable, and
+              // a record left without one (a compaction-summary switch, a plugin
+              // route with no live turn) is readable only in the unfiltered log. So
+              // when this conversation matches nothing *and* the log is not empty,
+              // the tab shows the whole history and says that is what it is doing -
+              // better than claiming "no switches in this conversation" over a log
+              // that plainly has some.
+              if (session === "" || fresh.entries.length > 0 || fresh.total === 0) return fresh;
+              return read(SWITCHES_PATH + "?limit=" + SWITCHES_LIMIT).then((everything) => {
+                if (everything.entries.length === 0) return fresh;
+                return { entries: everything.entries, total: everything.total, scope: "all" };
+              });
+            })
+            .then((result) => {
+              setState({
+                status: "ready",
+                entries: result.entries,
+                total: result.total,
+                error: "",
+                session: session,
+                scope: result.scope === "all" ? "all" : "session"
+              });
             })
             .catch((error) => {
-              setState({ status: "failed", entries: [], total: 0, error: String((error && error.message) || error), session: session });
+              setState({ status: "failed", entries: [], total: 0, error: String((error && error.message) || error), session: session, scope: "session" });
             });
         }, []);
         // Poll, and stop on unmount: a tab left open for hours still wants fresh rows,
@@ -1104,6 +1130,7 @@ window.__ModuleLoader__.load({
         head.push(jsx("div", { key: "__title", style: switchTitleStyle, children: t("switches.title") }));
         head.push(jsx("div", { key: "__count", style: switchHintStyle, children: state.status === "ready" && state.total > 0 ? fill(t("switches.count"), { n: state.total }) : t("switches.hint") }));
         if (state.session === "") head.push(jsx("div", { key: "__scope", style: switchHintStyle, children: t("switches.allSessions") }));
+        else if (state.status === "ready" && state.scope === "all") head.push(jsx("div", { key: "__scope", style: switchHintStyle, children: t("switches.fallback") }));
         return jsx("div", { key: "switches", "data-switch-log": true, style: switchWrapperStyle, children: head.concat(rows) });
       };
     }

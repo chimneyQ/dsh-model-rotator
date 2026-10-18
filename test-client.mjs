@@ -860,10 +860,56 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   check('6f the tab asks the route for this conversation explicitly', urls.length === 1 && urls[0].includes('?limit=200') && urls[0].includes('&session=sess-1'), urls.join(','))
   present.harness.dispose()
 
+  // -- this conversation has nothing, but the log is not empty -------------------
+  // The record is filed where the switch happens now, but rows can still land
+  // without a session (a plugin route with no live turn recorded one), and they
+  // are visible only in the unfiltered log. "No switches in this conversation"
+  // over a log that plainly has some is the wrong answer, so the tab falls back
+  // to everything and says so.
+  {
+    const fb = boot('present')
+    const fbTab = tabOf(fb)
+    urls = []
+    // The route's total is the size of the WHOLE log, not of the filtered slice,
+    // which is exactly why "0 rows but total 2" is the tell that something is
+    // recorded elsewhere rather than that nothing happened at all.
+    payloads.push({ ok: true, generatedAt: 1759000002000, session: 'sess-1', total: 2, entries: [] })
+    payloads.push(sample)
+    const fbNodes = await fb.harness.settle(fbTab.Component, {})
+    const fbRows = rowsOf(fbNodes)
+    check('6i a per-conversation miss falls back to the whole log',
+      fbRows.length === 2 && textOf(fbRows[0]).includes('alpha (provA)'),
+      'rows=' + fbRows.length + ' urls=' + urls.length)
+    check('6i2 the fallback asks for the unfiltered log exactly once',
+      urls.length === 2 && urls[1].endsWith('/_dsh/model-rotator/switches?limit=200'),
+      urls.join(','))
+    check('6i3 the fallback says that is what it is doing',
+      fbNodes.some((n) => textOf(n) === fb.dictionaries[fb.mod.NS].zh['switches.fallback']),
+      JSON.stringify(fbNodes.map(textOf).filter((x) => x.includes('切换记录')).slice(0, 3)))
+    fb.harness.dispose()
+  }
+
+  // -- an empty log stays the empty state (no pointless second request) -----------
+  {
+    // The global fetch stub hands out an all-empty payload once the queue runs
+    // dry, so this case is self-contained: an empty log must stay empty instead of
+    // firing the unfiltered request the fallback would make.
+    const fb2 = boot('present')
+    const fb2Tab = tabOf(fb2)
+    urls = []
+    payloads.length = 0
+    payloads.push({ ok: true, generatedAt: 1759000003000, session: 'sess-1', total: 0, entries: [] })
+    const fb2Nodes = await fb2.harness.settle(fb2Tab.Component, {})
+    check('6i4 an empty log is not mistaken for a filtering problem',
+      emptyOf(fb2Nodes) !== undefined && urls.length === 1 && urls[0].includes('&session=sess-1'),
+      'urls=' + urls.length + ' empty=' + (emptyOf(fb2Nodes) !== undefined) + ' ' + urls.join(','))
+    fb2.harness.dispose()
+  }
+
   // -- the copy stays paired ----------------------------------------------------
   const zh = absent.dictionaries[absent.mod.NS].zh
   const en = absent.dictionaries[absent.mod.NS].en
-  const switchKeys = ['switches.tab', 'switches.title', 'switches.hint', 'switches.count', 'switches.column.time', 'switches.column.from', 'switches.column.to', 'switches.column.reason', 'switches.empty', 'switches.loading', 'switches.failed', 'switches.allSessions', 'switches.purpose.compaction', 'switches.reason.quota', 'switches.reason.network', 'switches.reason.rateLimit', 'switches.reason.auth', 'switches.reason.server', 'switches.reason.unsupported', 'switches.reason.none']
+  const switchKeys = ['switches.tab', 'switches.title', 'switches.hint', 'switches.count', 'switches.column.time', 'switches.column.from', 'switches.column.to', 'switches.column.reason', 'switches.empty', 'switches.loading', 'switches.failed', 'switches.allSessions', 'switches.fallback', 'switches.purpose.compaction', 'switches.reason.quota', 'switches.reason.network', 'switches.reason.rateLimit', 'switches.reason.auth', 'switches.reason.server', 'switches.reason.unsupported', 'switches.reason.none']
   check('6g the switch tab is translated in both languages', switchKeys.every((k) => typeof zh[k] === 'string' && zh[k] !== '' && typeof en[k] === 'string' && en[k] !== ''), switchKeys.filter((k) => zh[k] === undefined || en[k] === undefined || zh[k] === '' || en[k] === '').join(','))
   check('6g2 the two dictionaries carry the same keys overall', JSON.stringify(Object.keys(zh).sort()) === JSON.stringify(Object.keys(en).sort()), 'zh=' + Object.keys(zh).length + ' en=' + Object.keys(en).length)
   // The Lead moved the default of noticeSwitch to off in 0.2.9: the record now lives

@@ -82,9 +82,17 @@ why:
 
 The tab reads the plugin's own record
 (`GET /_dsh/model-rotator/switches?session=<id>`), so a switch costs **no
-conversation context**. Records are filed per conversation: the host hands no
-session to a plugin route, so the session is bound at the turn boundary — the one
-moment that both sees the switch and knows whose conversation it was.
+conversation context**. Records are filed per conversation, and the session is
+bound **where the switch happens** — `ctx.get('agents').currentInitiator()` answers
+with the agent that started the call — rather than at the turn boundary, which is
+process-wide: whichever conversation stops a turn next would otherwise drain the
+queue and take everyone else's rows with it. A call with no live turn (a plugin
+route, a host without `agents`) still records, with an empty session; empty-session
+rows appear only in the every-session view.
+
+When this conversation has no rows of its own but the log is not empty, the tab
+falls back to **every conversation's** rows and labels the view as such, so history
+never reads as "nothing happened".
 
 If you also want the old line in the transcript, turn `noticeSwitch` on and the
 plugin posts it as before — `模型已切换：A → B`, with the failure kind in brackets
@@ -94,7 +102,7 @@ when it is known (`(quota)`, `(rate-limit)`).
 |-----------|--|
 | Default | **not posted** (`noticeSwitch: false`). The record is on the tab; the row is optional |
 | Shape | the host's own notice mechanism: a `user/message` whose source is `{ kind: 'model-rotator/switch', form: 'notice', summary }`. The conversation UI renders that form as a context row, not as something you typed |
-| Timing | at the turn boundary, via `agent/turn-stopping` + `agent.steer`. The switch already happened and the answer is already streaming, so announcing it mid-turn would insert a row in the middle of the reply it describes |
+| Timing | the notice row is posted at the turn boundary, via `agent/turn-stopping` + `agent.steer`. The switch already happened and the answer is already streaming, so announcing it mid-turn would insert a row in the middle of the reply it describes (the *record* is not written here — see above) |
 | Scope | the root conversation only. A switch inside a subagent transcript is somebody else's log |
 | On | `noticeSwitch: true` (or the settings-page toggle) |
 

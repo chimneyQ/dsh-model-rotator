@@ -43,7 +43,17 @@ function makeCtx(behaviour, seams, opts) {
   const warns = []
   const ctx = {
     logger: { warn: message => warns.push(String(message)) },
-    get: name => seams?.[name],
+    // The live-turn lookup the switch log files its records by. It stays absent
+    // unless a scenario opts in through opts.liveAgent, so every scenario that
+    // wants "no session could be determined" keeps getting exactly that.
+    get: name => {
+      const seam = seams?.[name]
+      if (seam !== undefined) return seam
+      if (name === 'agents' && typeof opts?.liveAgent === 'function') {
+        return { currentInitiator: () => opts.liveAgent() }
+      }
+      return undefined
+    },
     on(event, fn) { if (event === 'llm/stream') listeners.push(fn) },
     tools: { register(def) { registered.set(def.name, def); return () => {} } },
     llm: {
@@ -1436,14 +1446,32 @@ const quietHandle = (value) => ({
   // reuse the first one's rows. The cooling case therefore runs in its own process
   // (test-pin-cooling.mjs), where the seeded row is what boots.
   {
+    // The probe's stdout is captured through a file descriptor rather than a pipe.
+    // Confined Windows hosts deny the *pipe* a child's output would travel on
+    // (spawnSync with stdio 'pipe' fails EPERM), while an inherited file handle
+    // works everywhere - the same bytes, one less platform assumption.
     const { spawnSync } = await import('node:child_process')
+    const { openSync, closeSync, readFileSync, mkdtempSync } = await import('node:fs')
     const probe = join(dirname(fileURLToPath(import.meta.url)), 'test-pin-cooling.mjs')
-    const out = spawnSync(process.execPath, [probe], { encoding: 'utf8', timeout: 60000 })
+    const captureDir = mkdtempSync(join(tmpdir(), 'rotator-pin-'))
+    const capturePath = join(captureDir, 'stdout.txt')
+    const fd = openSync(capturePath, 'w')
+    let proc = null
+    let captured = ''
+    try {
+      proc = spawnSync(process.execPath, [probe], { stdio: ['ignore', fd, 'ignore'], timeout: 60000 })
+    } catch (error) {
+      captured = ''
+      proc = { error: error, status: null }
+    } finally {
+      closeSync(fd)
+    }
+    try { captured = readFileSync(capturePath, 'utf8') } catch { captured = '' }
     let order = []
-    try { order = JSON.parse(String(out.stdout).trim().split('\n').pop()).order } catch { /* asserted below */ }
+    try { order = JSON.parse(String(captured).trim().split('\n').pop()).order } catch { /* asserted below */ }
     check('a cooling pin is not dispatched ahead of a healthy model',
       order.length > 1 && order[1] !== 'provA/beta',
-      'order=' + order.join(',') + (out.stderr ? '  stderr=' + String(out.stderr).slice(0, 100) : ''))
+      'order=' + order.join(',') + (proc?.error ? '  spawn=' + String(proc.error).slice(0, 100) : ''))
   }
 }
 
@@ -1480,8 +1508,10 @@ const quietHandle = (value) => ({
 // ---- scenario 20: the switch log the conversation tab reads -------------------
 // The record used to exist only as a notice row inside the conversation, which
 // spent context on a plumbing fact the reader may not have been looking at. It
-// now lives in the plugin, keyed by the session captured at the turn boundary,
-// and the row is opt-in - so a reader who turned the row off still has history.
+// now lives in the plugin, keyed by the session captured *where the switch
+// happened* - not at the turn boundary, which is process-wide and therefore
+// files one conversation's switch under whichever conversation stops its turn
+// next. The row is opt-in, so a reader who turned it off still has history.
 {
   const { mkdtempSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'rotator-switchlog-'))
@@ -1492,42 +1522,99 @@ const quietHandle = (value) => ({
     const quotaThenOk = options => (options.model === 'alpha'
       ? [{ type: 'finish', reason: { kind: 'error', failure: { message: '429: {"message":"insufficient balance"}' } } }]
       : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
-    const h = makeCtx(quotaThenOk, undefined, { route: true })
+    // The session the walk ran under. Nothing in the llm/stream seam carries one,
+    // so the plugin asks the live-turn lookup - the same seam adoptServedModel()
+    // already trusts - and this fixture answers with the agent it "started".
+    const liveSession = { id: 'sess-1', header: {} }
+    const h = makeCtx(quotaThenOk, undefined, { route: true, liveAgent: () => ({ session: liveSession, steer: () => {} }) })
     const steered = []
     const innerOn = h.ctx.on
     h.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') h.turnStopping = fn; return innerOn(event, fn) }
     apply(h.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
-    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    // The record is written where the switch happens now, so "starts empty" is
+    // asserted before the failing run, not after it.
     const empty = await h.request('GET', undefined, '/_dsh/model-rotator/switches', 1)
     check('20a the log starts empty', empty.status === 200 && empty.payload.entries.length === 0, JSON.stringify(empty.payload).slice(0, 120))
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
 
-    h.turnStopping({ agent: { session: { id: 'sess-1', header: {} }, steer: m => steered.push(m) }, turn: 1, signal: { aborted: false } })
-    check('20b the in-conversation row is off by default', steered.length === 0, 'steered=' + steered.length)
-
+    // The point of the whole rewrite: the record is durable *without* the turn
+    // boundary. No turn-stopping has fired yet, and the row is already filed -
+    // with the session the switch itself ran under.
     const mine = await h.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-1', 1)
     const row = mine.payload.entries[0]
-    check('20c the switch is recorded against its session',
-      mine.status === 200 && mine.payload.entries.length === 1 && row.session === 'sess-1'
-        && row.reason === 'quota' && row.from.provider === 'provA' && row.to.provider === 'provA',
+    check('20b the record lands without any turn-stopping',
+      mine.status === 200 && mine.payload.entries.length === 1 && row !== undefined && row.session === 'sess-1',
+      JSON.stringify(mine.payload.entries).slice(0, 200))
+    check('20c the switch is recorded against the session it ran under',
+      row !== undefined && row.reason === 'quota' && row.from.provider === 'provA' && row.to.provider === 'provA',
       JSON.stringify(mine.payload.entries).slice(0, 200))
     check('20d the labels are the ones the reader recognises',
-      row.from.label === 'alpha' && row.to.label === 'beta',
-      JSON.stringify([row.from.label, row.to.label]))
+      row !== undefined && row.from.label === 'alpha' && row.to.label === 'beta',
+      row === undefined ? 'no row' : JSON.stringify([row.from.label, row.to.label]))
+
+    // The boundary is now only the *opt-in* row - off by default - and it neither
+    // duplicates the record nor moves it.
+    h.turnStopping({ agent: { session: { id: 'sess-1', header: {} }, steer: m => steered.push(m) }, turn: 1, signal: { aborted: false } })
+    check('20e the in-conversation row is off by default', steered.length === 0, 'steered=' + steered.length)
+    const afterBoundary = await h.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-1', 1)
+    check('20f the boundary neither duplicates nor relocates the record',
+      afterBoundary.payload.entries.length === 1 && afterBoundary.payload.entries[0].session === 'sess-1',
+      JSON.stringify(afterBoundary.payload.entries).slice(0, 200))
 
     const other = await h.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-2', 1)
-    check('20e another conversation sees nothing', other.payload.entries.length === 0, 'entries=' + other.payload.entries.length)
+    check('20g another conversation sees nothing', other.payload.entries.length === 0, 'entries=' + other.payload.entries.length)
     const all = await h.request('GET', undefined, '/_dsh/model-rotator/switches', 1)
-    check('20f asking for every session returns it', all.payload.entries.length === 1 && all.payload.total === 1, JSON.stringify(all.payload).slice(0, 120))
+    check('20h asking for every session returns it', all.payload.entries.length === 1 && all.payload.total === 1, JSON.stringify(all.payload).slice(0, 120))
 
-    // Opting back in still steers the row, and the record is unchanged by it.
-    const opt = makeCtx(quotaThenOk, undefined, { route: true })
+    // -- the cross-talk regression -------------------------------------------------
+    // The reported failure, reproduced: conversation A switches and its turn never
+    // stops; conversation B stops its turn afterwards. Before this fix A's switch
+    // was batched out of the process-wide queue at B's boundary and filed under
+    // B's session, which is what made A's own tab read "no model switches in this
+    // conversation". A must keep its record, and B's boundary must add nothing.
+    const aSession = { id: 'sess-A', header: {} }
+    const cross = makeCtx(quotaThenOk, undefined, { route: true, liveAgent: () => ({ session: aSession, steer: () => {} }) })
+    const innerOn2 = cross.ctx.on
+    cross.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') cross.turnStopping = fn; return innerOn2(event, fn) }
+    apply(cross.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+    await collect(cross.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    // No turn-stopping for A at all. B's boundary fires next, as the other
+    // conversation's would in the live harness.
+    const steeredB = []
+    cross.turnStopping({ agent: { session: { id: 'sess-B', header: {} }, steer: m => steeredB.push(m) }, turn: 5, signal: { aborted: false } })
+    const aRows = await cross.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-A', 1)
+    const bRows = await cross.request('GET', undefined, '/_dsh/model-rotator/switches?session=sess-B', 1)
+    check('20i a conversation that never stops its turn still owns its record',
+      aRows.payload.entries.length === 1 && aRows.payload.entries[0].session === 'sess-A',
+      JSON.stringify(aRows.payload.entries).slice(0, 200))
+    check('20j a later turn boundary cannot steal a record it did not cause',
+      bRows.payload.entries.length === 0,
+      'entries=' + bRows.payload.entries.length + ' ' + JSON.stringify(bRows.payload.entries).slice(0, 160))
+
+    // -- no live turn --------------------------------------------------------------
+    // A plugin route is not a turn: with no currentInitiator the switch still has
+    // to be recorded, and it says so honestly by leaving the session empty - the
+    // log reads '' as "every session", never as an error.
+    const orphan = makeCtx(quotaThenOk, undefined, { route: true })
+    apply(orphan.ctx, { retriesPerModel: 0, maxCandidates: 6 }, {})
+    await collect(orphan.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const orphanAll = await orphan.request('GET', undefined, '/_dsh/model-rotator/switches', 1)
+    check('20k a switch with no live turn is still recorded, with an empty session',
+      orphanAll.payload.entries.length === 1 && orphanAll.payload.entries[0].session === '',
+      JSON.stringify(orphanAll.payload.entries).slice(0, 200))
+    check('20l a missing live turn neither throws nor complains about it',
+      orphan.warns.filter(w => /session|initiator|agent/i.test(w)).length === 0,
+      JSON.stringify(orphan.warns).slice(0, 200))
+
+    // Opting the row back in still steers the row, and the record is unchanged by it.
+    const opt = makeCtx(quotaThenOk, undefined, { route: true, liveAgent: () => ({ session: liveSession, steer: () => {} }) })
     const steered2 = []
-    const innerOn2 = opt.ctx.on
-    opt.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') opt.turnStopping = fn; return innerOn2(event, fn) }
+    const innerOn3 = opt.ctx.on
+    opt.ctx.on = (event, fn) => { if (event === 'agent/turn-stopping') opt.turnStopping = fn; return innerOn3(event, fn) }
     apply(opt.ctx, { retriesPerModel: 0, maxCandidates: 6, noticeSwitch: true }, {})
     await collect(opt.run({ provider: 'provA', model: 'alpha', messages: [] }))
     opt.turnStopping({ agent: { session: { id: 'sess-1', header: {} }, steer: m => steered2.push(m) }, turn: 1, signal: { aborted: false } })
-    check('20g opting the row back in still posts it',
+    check('20m opting the row back in still posts it',
       steered2.length === 1 && steered2[0].source.form === 'notice',
       'steered=' + steered2.length)
   } finally {
