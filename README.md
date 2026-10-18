@@ -568,7 +568,7 @@ the process would let scenario 5's dead keys decide scenario 9's candidate
 order. Every harness therefore mounts onto a stats file of its own, and the two
 that mean to assert across applies opt into sharing one explicitly.
 
-`test-settings.mjs` (34 assertions) asserts the host's own rules, not this
+`test-settings.mjs` asserts the host's own rules, not this
 plugin's opinion of them: it copies the shipped `volatileForm()` walk and
 checks that the exported `Config` yields exactly the intended page fields
 (a non-volatile sibling is dropped), and that the page outranks `config.json`
@@ -576,7 +576,7 @@ for the keys it owns while the file still fills the rest. It loads the host's
 real `schemastery` and `cosmokit`, so `createVolatile()` handles behave
 exactly as they do in the app.
 
-`test-client.mjs` (44 assertions) runs `client.js` against a stub module
+`test-client.mjs` runs `client.js` against a stub module
 loader: the `window.__ModuleLoader__.load()` shape, the exported `apply` /
 `inject`, the two cells (`settings.section` and `plugins.item`) registered for
 the `model-rotator` namespace, and — the anti-drift check — that the fields the card renders and
