@@ -12,12 +12,30 @@
  */
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 
-const profile = 'C:/Users/lenovo/.dsh/profiles/desktop'
+// Resolved rather than spelled out: the hardcoded user name made the suite die in
+// createRequire on every other machine. See the same helper in test-client.mjs.
+const profile = resolveProfile()
 const req = createRequire(join(profile, 'package.json'))
+/** First existing profile whose node_modules carries the host packages. */
+function resolveProfile() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  const candidates = [
+    process.env.DSH_PROFILE_DIR,
+    join(home, 'profiles', 'desktop'),
+    join(home, 'profiles', 'web'),
+    home,
+  ].filter((value) => typeof value === 'string' && value !== '')
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(join(candidate, 'node_modules', '@deepseek-ai', 'schemastery'))) return candidate.replace(/\\/g, '/')
+    } catch { /* keep looking */ }
+  }
+  throw new Error('no DSH profile with @deepseek-ai/schemastery found; set DSH_HOME or DSH_PROFILE_DIR')
+}
 const z = req('@deepseek-ai/schemastery')
 const ck = req('@deepseek-ai/cosmokit')
 
@@ -58,7 +76,10 @@ check('1a Config is exported (page exists at all)', Config !== undefined && type
 const form = volatileForm(new z(Config.toJSON()))
 check('1b volatileForm keeps the schema', form !== undefined)
 const kept = Object.keys(form?.dict ?? {}).sort()
-check('1c exactly the intended top-level fields', JSON.stringify(kept) === JSON.stringify(['adoptSwitchedModel', 'allowImageFailover', 'confirmSwitch', 'confirmTimeoutMs', 'cooldownBaseMs', 'enabled', 'maxCandidates', 'maxCooldownMs', 'noticeSwitch', 'preferSameModel', 'quotaCooldownHour', 'quotaCooldownMs', 'retriesPerModel', 'retryBackoffMs', 'statsPersistTtlMs', 'weights', 'windowGuard']), kept.join(','))
+// The expected list is written out on purpose: a page that silently grows a field
+// is a page whose control set nobody reviewed. breakerFailures / breakerRestMs are
+// the two additions - the breaker's threshold and its rest, both numbers.
+check('1c exactly the intended top-level fields', JSON.stringify(kept) === JSON.stringify(['adoptSwitchedModel', 'allowImageFailover', 'breakerFailures', 'breakerRestMs', 'confirmSwitch', 'confirmTimeoutMs', 'cooldownBaseMs', 'enabled', 'maxCandidates', 'maxCooldownMs', 'noticeSwitch', 'preferSameModel', 'quotaCooldownHour', 'quotaCooldownMs', 'retriesPerModel', 'retryBackoffMs', 'statsPersistTtlMs', 'weights', 'windowGuard']), kept.join(','))
 const weightKeys = Object.keys(form?.dict?.weights?.dict ?? {}).sort()
 check('1d weights exposes its two leaves as fields', JSON.stringify(weightKeys) === JSON.stringify(['connectivity', 'speed']), weightKeys.join(','))
 check('1e the walk leaves each kept leaf a usable schema', form?.dict?.weights?.dict?.connectivity?.type === 'number' && form?.dict?.enabled?.type === 'boolean', 'leaf=' + String(form?.dict?.weights?.dict?.connectivity?.type))

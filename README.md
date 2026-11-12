@@ -152,6 +152,34 @@ turn has no live root agent (a delegated sub-agent has nobody to answer), or the
 timeout is reached, the walk continues unconfirmed. An unattended harness must
 not stall on a card nobody is watching.
 
+## Route chains: naming the order yourself
+
+Everything above is the plugin deciding for you. When you already know which order to try, declare a route in `model-rotator/config.json` (borrowed from [dsh-xdpool](https://github.com/XDTrees/dsh-xdpool)'s routing page):
+
+```json
+{
+  "routes": [
+    { "name": "writing", "members": ["modelscope/deepseek-ai/DeepSeek-V4.1-Flash", "trae/deepseek-v4.1-flash"], "strategy": "fallback" },
+    { "name": "spread", "members": ["provA/x", "provB/x"], "strategy": "round-robin", "stickyLimit": 3 }
+  ],
+  "activeRoute": "writing"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `strategy: "fallback"` | Restarts from the head every turn. The first member is the one you put first; the next is tried only when it fails |
+| `strategy: "round-robin"` | Starts from a cursor and advances it every `stickyLimit` turns. For several equivalent upstreams of one model: a rate limit moves the turn on, while a multi-turn exchange stays together |
+| `activeRoute` | Which route is in force. A name the file does not declare is reported as `ignored` rather than pretended to work |
+
+Three boundaries are what make it trustworthy:
+
+- **The model the turn started on always stays first.** A route decides what comes after it, never what replaces it - that only happens on a failure you approved (or a quota wall).
+- **Members are resolved against the live roster.** A hand-typed typo, or a member blocked by `disabledProviders` / `disabledModels`, is never dispatched and is named under `not dispatched: …`. A chain that silently shrinks is the worst outcome available: you believe your order was obeyed while a different model answered.
+- **Cursors are not persisted.** After a restart round-robin begins at the head again, on purpose: restoring a stale cursor would continue a rotation you can no longer see.
+
+Above the model list on the settings page sits the **route editor**: create, rename and delete; move a route or a member up and down; switch `fallback`/`round-robin` (with its `stickyLimit`); enable or disable; and mark which one is in force. The member box autocompletes from the live roster, and an id the roster does not know is still accepted (the roster may not have loaded yet) but marked in place as *not a candidate* rather than silently dropped. Edits accumulate in a local draft and only reach the file on *Save routes* - a route's content is its order, order takes several steps to arrange, and a half-arranged table written to disk is the next turn pointed at the wrong model.
+
 ## The failure kind decides the rest
 
 A failure is not just a string: it is classified, and the class decides how long
@@ -242,6 +270,26 @@ reading the code:
   model list route : /_dsh/model-rotator/models (GET the grouped list; POST {key, enabled} to switch one off or on)
 ```
 
+### Asking for less when the ranking is large
+
+The ranking is **one row per discovered route**. On a machine with many providers (488 pairs
+measured here) that single table dominated the whole tool result — and a tool result is
+context that rides along in the conversation.
+
+So the status tool takes two optional controls:
+
+| Control | Default | Effect |
+|---|---|---|
+| `maxRows` | `0` | Keep only the N highest-scoring rows; **0 = every row** (the default: nothing is clipped). The withheld count is always stated. |
+| `summary` | `false` | Collapse the long `disabled models` / `disabled channels` lists to a few names plus a count. |
+
+Not clipping by default is deliberate: a ranking that was silently cut reads as "these
+are all the routes", which is precisely the wrong conclusion for someone hunting a model
+that is missing. When a cut does happen, a `… N more row(s) withheld` line is appended.
+
+If you only want to know the state rather than audit every row, `maxRows: 20` with
+`summary: true` cuts the output to a fraction of its size.
+
 ## Configuration
 
 Optional, at `%DSH_HOME%\model-rotator\config.json` (hot-reloaded on change).
@@ -269,7 +317,13 @@ Every field has a safe default, so the plugin works with no file at all.
   "excludePatterns": [],
   "disabledModels": [],
   "enabledModels": [],
-  "pinned": ""
+  "pinned": "",
+  "breakerFailures": 5,
+  "breakerRestMs": 21600000,
+  "routes": [
+    { "name": "writing", "members": ["modelscope/deepseek-ai/DeepSeek-V4.1-Flash", "trae/deepseek-v4.1-flash"], "strategy": "fallback" }
+  ],
+  "activeRoute": ""
 }
 ```
 
@@ -330,6 +384,8 @@ Every field has a safe default, so the plugin works with no file at all.
   rotation when its wrapper name does not follow the `<provider>-vision`
   convention. Written by the same switch.
 - `pinned` — preferred head of the failover order.
+- `routes` / `activeRoute` — name the order yourself; see the route chains section. One route is `{name, members, strategy, stickyLimit, enabled}`; `fallback` restarts from the head every turn, `round-robin` rotates every `stickyLimit` turns. Members are resolved against the live roster: one that cannot be resolved is never dispatched and never silently shortens the chain.
+- `breakerFailures` / `breakerRestMs` — a route that fails `breakerFailures` times in a row (default 5) rests for `breakerRestMs` (default 6 hours, never less than `maxCooldownMs`). Counted rather than read out of the message: classification is best effort, the counter is measured.
 
 ## Settings page
 
@@ -487,6 +543,27 @@ pre-switch question can actually reach you, and why not when it cannot),
 header), `session switch` (whether the plugin can record the swapped model on
 the session), `failure verdict` and `switch order`.
 
+
+**Scenario 25** is the route chain and the breaker. Both are policy, and policy that
+only shows up as "it came back too soon" in the field should be pinned here: a
+declared route is tried before the measured ranking while the model the turn started
+on stays first; `fallback` restarts from the head on the next turn while
+`round-robin` advances its cursor and `stickyLimit` holds one member for exactly that
+many turns; an `activeRoute` the file does not declare is reported as `ignored`; a
+member the roster does not list is never dispatched and is named under
+`not dispatched`. The breaker is asserted through the exported `breakerTripped()`
+seam (below the threshold, at it) and through the report, because its whole point is
+that it fires on runs we cannot classify - classification is best effort, the counter
+is measured. **25h** pins the four sentences lifted out of this install's own
+`stats.json`, and **25h2** pins the one that must NOT be classified: a *blocked*
+request with a resend hint is not a dead route, and resting it for six hours would
+retire a channel a resend may well reach.
+
+The route fixtures also taught a lesson worth recording: an earlier version of the
+suite restored `DSH_MODEL_ROTATOR_CONFIG` immediately after `apply()`, and the plugin
+resolves that path lazily on the first turn - so every route assertion read an absent
+file and the feature looked inert. Environment state is per-process, so a scenario that
+points it somewhere has to leave it there until its own assertions are done.
 ## Install
 
 From npm (recommended):
@@ -524,7 +601,7 @@ node test-settings.mjs    # server-side settings contract, against the host rule
 node test-client.mjs      # browser bundle: loader shape, card registration, fields
 ```
 
-All three run with no network and no DSH process. `test-offline.mjs` (135
+All three run with no network and no DSH process. `test-offline.mjs` (222
 assertions) covers failure-then-retry, no-retry-once-text-flows, image-turn skip,
 all-candidates-failed, cooldown accounting, aborted-signal passthrough,
 non-chat filtering through a real waterfall, tool registration, and the consent

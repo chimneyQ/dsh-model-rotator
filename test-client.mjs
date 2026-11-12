@@ -14,12 +14,35 @@
  *      rendering it neither throws nor misses a field.
  */
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const profile = 'C:/Users/lenovo/.dsh/profiles/desktop'
+// The profile is resolved, not spelled out. A hardcoded user name made this
+// suite unrunnable on any machine but the one it was written on: the anchor
+// package.json then does not exist, createRequire throws, and the whole suite
+// dies before its first assertion - which is how two stale assertions survived.
+// DSH_HOME wins (the host's own override), then the desktop profile, then the
+// profile directory beside this checkout.
+const profile = resolveProfile()
 const z = createRequire(join(profile, 'package.json'))('@deepseek-ai/schemastery')
+/** First existing profile whose node_modules carries the host packages. */
+function resolveProfile() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  const candidates = [
+    process.env.DSH_PROFILE_DIR,
+    join(home, 'profiles', 'desktop'),
+    join(home, 'profiles', 'web'),
+    home,
+  ].filter((value) => typeof value === 'string' && value !== '')
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(join(candidate, 'node_modules', '@deepseek-ai', 'schemastery'))) return candidate.replace(/\\/g, '/')
+    } catch { /* keep looking */ }
+  }
+  throw new Error('no DSH profile with @deepseek-ai/schemastery found; set DSH_HOME or DSH_PROFILE_DIR')
+}
 // Self-relative: a hardcoded absolute path made this suite test the DEV tree
 // instead of the tree it ships from, so the published bytes were never covered.
 // dirname(fileURLToPath(import.meta.url)) is the directory this file lives in.
@@ -336,6 +359,13 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     at: 0,
     total: 4,
     inRotation: 3,
+    // The declared routes, as modelListReport() reports them: a fallback chain in
+    // force, and a round-robin chain whose second member left the roster.
+    routes: [
+      { name: '写稿', strategy: 'fallback', stickyLimit: 1, enabled: true, active: true, usableCount: 2, members: [ { key: 'provA/beta', usable: true }, { key: 'provB/gamma', usable: true } ] },
+      { name: 'spread', strategy: 'round-robin', stickyLimit: 2, enabled: true, active: false, usableCount: 1, members: [ { key: 'provC/ds-flash', usable: true }, { key: 'provZ/gone', usable: false } ] },
+    ],
+    activeRoute: '写稿',
     // The host sends the flat roster alongside the grouped view; the counter reads
     // it. Left empty here it exercised the section-walk fallback instead, so both
     // shapes are covered: this one is filled, and 5v2 below empties it again.
@@ -446,6 +476,23 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   const click = (node) => node.props.onClick({ preventDefault() {}, stopPropagation() {} })
 
   let nodes = await settle()
+  // ---- the routes panel --------------------------------------------------
+  // dsh-xdpool's routing page, reduced to what a file cannot do: say which order
+  // is in force and let the reader change it. Asserted through the rendered tree, so
+  // a panel that stops drawing fails here instead of only in a browser.
+  const routeHead = nodes.find((n) => /data-route-panel/.test(JSON.stringify(n.props || {})))
+  const routeButtons = btns(nodes).filter((n) => /设为当前|取消路由/.test(textOf(n)))
+  check('5w the routes panel renders one row per declared route', routeButtons.length === 2, 'route buttons=' + routeButtons.length + ' all=' + btns(nodes).map(textOf).slice(0, 6).join(' | '))
+  check('5w2 the in-force route is labelled, not guessed', routeButtons.some((n) => /取消路由/.test(textOf(n))) && routeButtons.some((n) => /设为当前/.test(textOf(n))), routeButtons.map(textOf).join(' | '))
+  check('5w3 a round-robin route shows its strategy and sticky limit', nodes.some((n) => /轮换 x2/.test(textOf(n))) || btns(nodes).concat(nodes).some((n) => /轮换 x2/.test(textOf(n))), '')
+  // A member the roster lost is named in the row's own warning line, not only when
+  // the route happens to be expanded: a chain that silently shrank would send the
+  // turn to a model the reader did not choose while the panel still showed their
+  // order. The editor derives the lost set from the live roster, so this also
+  // proves the derivation runs (the fixture's provZ/gone is in no channel).
+  const lostLine = nodes.map(textOf).find((text) => /不在候选里/.test(text))
+  check('5w5 a member the roster lost is named, not dropped', lostLine !== undefined && /provZ\/gone/.test(lostLine), lostLine === undefined ? 'no warning line' : lostLine.slice(0, 80))
+
   check('5a the roster renders its sections from the payload', btns(nodes).length > 4 && byLabel(nodes, /对话渠道/) !== undefined, 'buttons=' + btns(nodes).length)
   check('5b it fetches the list exactly once', fetched.length === 1, 'fetches=' + fetched.length)
   check('5c the vision section starts folded', !btns(nodes).some((n) => /-vision/.test(textOf(n))), '')
@@ -490,6 +537,68 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   const rowBtn = btns(nodes).find((n) => /^关闭$/.test(textOf(n)))
   if (rowBtn !== undefined) { click(rowBtn); await settle() }
   check('5m a model row still posts the model scope', postBodies.some((b) => b.scope === 'model'), JSON.stringify(postBodies.slice(-2)))
+  // ---- the editor itself --------------------------------------------------
+  // Asserted by driving it: expand a route, flip its strategy, add and remove a
+  // member, reorder one, then save. A read-only panel would render all the same text
+  // and pass a snapshot check, which is why none of this is a regex on the source.
+  // The chevron is rendered from a literal "\u25B6 " (a JS escape in the source), so the
+  // rendered text holds the real glyph. Matching on the route name alone is the robust
+  // form: the fixture's route is the only fold button whose text ends with 写稿.
+  const foldBtn = btns(nodes).find((n) => /写稿$/.test(textOf(n).trim()))
+  if (foldBtn !== undefined) { click(foldBtn); await settle() }
+  const afterExpand = await settle()
+  const selectEls = afterExpand.filter((n) => n.type === "select")
+  check('5x expanding a route opens its editor', foldBtn !== undefined && selectEls.length >= 1 && afterExpand.some((n) => n.type === "input" && n.props && n.props.list), 'selects=' + selectEls.length + ' inputs=' + afterExpand.filter((n) => n.type === "input").length)
+  check('5x2 the strategy select offers both strategies',
+    selectEls.length > 0 && Array.isArray(selectEls[0].props.children) && selectEls[0].props.children.length === 2,
+    selectEls.length > 0 ? JSON.stringify(selectEls[0].props.children && selectEls[0].props.children.map((o) => o.props.value)) : 'none')
+
+  const before = postBodies.length
+  const saveBtn = btns(afterExpand).find((n) => /^保存路由$/.test(textOf(n)))
+  check('5x3 save is disabled until something is edited', saveBtn !== undefined && saveBtn.props.disabled === true, saveBtn === undefined ? 'no save button' : 'disabled=' + saveBtn.props.disabled)
+
+  // Flip the strategy: that stages a draft, which both enables save and reveals the
+  // sticky-limit control the round-robin mode needs.
+  if (selectEls.length > 0) {
+    selectEls[0].props.onChange({ target: { value: 'round-robin' } })
+    const staged = await settle()
+    check('5x4 choosing round-robin reveals its sticky limit', staged.some((n) => n.type === "input" && n.props && n.props.type === "number" && /连任轮数/.test(String(n.props["aria-label"] || ""))), staged.filter((n) => n.type === "input").map((n) => String(n.props["aria-label"] || n.props.type)).join(','))
+    const saveNow = btns(staged).find((n) => /^保存路由$/.test(textOf(n)))
+    check('5x5 an edit enables save', saveNow !== undefined && saveNow.props.disabled === false, saveNow === undefined ? 'no save' : 'disabled=' + saveNow.props.disabled)
+    if (saveNow !== undefined) {
+      click(saveNow)
+      await settle()
+      const posted = postBodies.slice(before).find((b) => b.scope === 'routes')
+      check('5x6 saving posts the whole route table', posted !== undefined && Array.isArray(posted.routes) && posted.routes.some((r) => r.strategy === 'round-robin'), JSON.stringify(posted && posted.routes && posted.routes.map((r) => r.name + ':' + r.strategy)))
+    }
+  }
+
+
+  // Clearing a route is the *absence* of a name, not the name with enabled=false:
+  // the host reads the name, and posting it again would re-set the route the button
+  // was supposed to clear.
+  const clearBtn = routeButtons.find((n) => /取消路由/.test(textOf(n)))
+  if (clearBtn !== undefined) { click(clearBtn); await settle() }
+  // Collapse the editor again: a reader closes the fold after editing, and the
+  // search assertions below count monospace name spans - which the expanded member
+  // list legitimately contributes. Leaving it open would make the roster filter look
+  // broken because the editor is showing ids of its own.
+  // Both routes fold to a chevron; "写稿" is the one this block expanded. The name is
+  // unchanged after a save (the draft only carried the strategy), so matching on it is
+  // the precise handle.
+  // The fold state is the editor's, and a save does not force it closed: whichever
+  // state the reader left it in is the state they see. So only click when it is
+  // actually open - clicking a closed fold would open it and prove the opposite.
+  const foldToggle = btns(nodes).find((n) => /写稿\s*$/.test(textOf(n)))
+  if (foldToggle !== undefined && nodes.some((n) => n.type === "select")) {
+    click(foldToggle)
+    nodes = await settle()
+  }
+  check('5x7 the editor folds back to a header', !nodes.some((n) => n.type === "select"), String(nodes.filter((n) => n.type === "select").length))
+
+  check('5w6 clearing the route posts an empty name', postBodies.some((b) => b.scope === 'route' && b.key === ''), JSON.stringify(postBodies.filter((b) => b.scope === 'route')))
+
+
   // The button's direction, not just its shape: a channel offered as "关闭本渠道"
   // must post enabled=false. Posting the state it already has is a no-op, which is
   // exactly how the button looked broken while the route was working perfectly.
@@ -522,6 +631,14 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   check('5s the box is empty by default and the full roster shows', box !== undefined && box.props.value === '', box ? JSON.stringify(box.props.value) : 'no box')
 
   // The unfiltered baseline the filtered count is compared against.
+  /**
+   * Model rows on screen.
+   *
+   * The signature is the row's own geometry (flex, a top border, gap 10), which the
+   * roster builds with modelRowStyle. The route editor deliberately uses a different
+   * geometry - gap 12, a dotted border - so that a route header can never be counted
+   * as a model row. This assertion failed once because the two shared the triple.
+   */
   const rowCountAt = (nodes) => nodes.filter((n) => n.type === 'div' && n.props && n.props.style && n.props.style.display === 'flex' && n.props.style.borderTop !== undefined && n.props.style.gap === '10px').length
   const fullRowCount = rowCountAt(fnodes)
 

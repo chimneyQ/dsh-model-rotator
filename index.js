@@ -105,6 +105,10 @@ const SETTINGS_DEFAULTS = Object.freeze({
   quotaCooldownMs: 12 * 60 * 60 * 1000,
   quotaCooldownHour: 0,
   statsPersistTtlMs: 24 * 60 * 60 * 1000,
+  // Breaker: a route that fails this many times in a row is rested for far longer
+  // than the ordinary backoff. See cooldownUntilFor().
+  breakerFailures: 5,
+  breakerRestMs: 6 * 60 * 60 * 1000,
 })
 
 /**
@@ -275,6 +279,8 @@ const PAGE_KEYS = [
   'preferSameModel',
   'noticeSwitch',
   'windowGuard',
+  'breakerFailures',
+  'breakerRestMs',
 ]
 
 /** Combo routes (virtual catalog rows) are never a candidate body. */
@@ -422,6 +428,34 @@ const HARD_MAX_CANDIDATES = 8
 const FAMILY_CHANNELS_MAX = 2
 
 /**
+ * Chain strategies for a declared route.
+ *
+ * Borrowed from dsh-xdpool's routing page, and for its reason: fallback is the
+ * predictable mode (the first member the user put first is the one tried first,
+ * and a failure there is a reason to try the second), while round-robin is the
+ * mode that spreads load across several equivalent upstreams - and stickyLimit
+ * is how many consecutive turns one member keeps before the cursor moves.
+ *
+ * Anything unrecognisable on disk falls back to 'fallback': a typo must not turn
+ * a predictable route into a rotation the user did not ask for.
+ */
+const ROUTE_STRATEGIES = ['fallback', 'round-robin']
+
+/**
+ * Ceilings on the declared routes.
+ *
+ * The list is hand-edited JSON that feeds the head of the walk, not a second
+ * ranking: a route is a statement about which models answer *this* conversation,
+ * and a wall of them would be indistinguishable from the ranking it overrides.
+ */
+const HARD_MAX_ROUTES = 32
+const HARD_MAX_ROUTE_MEMBERS = 24
+
+/** Turns one round-robin member keeps before the cursor moves, and its ceiling. */
+const ROUTE_STICKY_DEFAULT = 1
+const HARD_MAX_STICKY = 20
+
+/**
  * Hard ceiling on same-model retries per candidate, regardless of config.
  *
  * A retry of the model that just failed costs the provider another dispatch, so
@@ -498,6 +532,14 @@ export const Config = z === undefined ? undefined : z.object({
     .description('Post one line in the conversation when a turn is answered by a different model than the one asked for (a notice, not a message).'),
   windowGuard: z.boolean().default(SETTINGS_DEFAULTS.windowGuard).volatile()
     .description('Skip candidates whose context window cannot hold this conversation plus a reply. A model that is too small for the request would have killed the turn, and the compaction that could have shrunk it cannot run on that route either.'),
+  // Breaker. On the page because it is the one setting whose symptom is invisible:
+  // a route that fails every dispatch looks like "a model that is sometimes slow"
+  // from the conversation, and the fix is to rest it for hours rather than for the
+  // capped half hour. Both fields are numbers so the page's own control applies.
+  breakerFailures: z.number().step(1).min(1).max(HARD_MAX_RETRIES + 20).default(SETTINGS_DEFAULTS.breakerFailures).volatile()
+    .description('Consecutive failures after which a route is rested for hours instead of the capped backoff. A run of failures we cannot classify still counts.'),
+  breakerRestMs: z.number().min(0).max(24 * 60 * 60 * 1000).default(SETTINGS_DEFAULTS.breakerRestMs).volatile()
+    .description('How long a tripped route rests, in milliseconds. The larger of this and maxCooldownMs is used, so a longer maxCooldownMs still wins.'),
   weights: z.object({
     connectivity: z.number().min(0).default(SETTINGS_DEFAULTS.weights.connectivity).volatile()
       .description('Ranking weight for the measured success rate.'),
@@ -583,6 +625,8 @@ function defaultConfig() {
     enabledModels: [],
     disabledProviders: [],
     pinned: '',
+    routes: [],
+    activeRoute: '',
   }
 }
 
@@ -630,7 +674,74 @@ function normalizeConfig(raw) {
     enabledModels: Array.isArray(raw.enabledModels) ? raw.enabledModels.map(String) : [],
     disabledProviders: Array.isArray(raw.disabledProviders) ? raw.disabledProviders.map(String) : [],
     pinned: typeof raw.pinned === 'string' ? raw.pinned : '',
+    breakerFailures: Math.min(
+      Math.max(Math.trunc(numberOr(raw.breakerFailures, base.breakerFailures)), 1),
+      HARD_MAX_RETRIES + 20,
+    ),
+    breakerRestMs: Math.min(
+      Math.max(numberOr(raw.breakerRestMs, base.breakerRestMs), 0),
+      24 * 60 * 60 * 1000,
+    ),
+    routes: normalizeRoutes(raw.routes),
+    activeRoute: typeof raw.activeRoute === 'string' ? raw.activeRoute.trim() : '',
   }
+}
+
+/**
+ * Normalise the declared routes.
+ *
+ * The list is hand-edited JSON, so every field has to survive being wrong. Three
+ * rules, each earned by a failure mode a looser reader would hide:
+ *
+ *   1. A route with no usable member is DROPPED rather than kept as an empty row.
+ *      An empty route would still be selectable, and selecting it would mean "try
+ *      nothing, then the ranking" - which reads as "the route was obeyed" while a
+ *      model nobody named answered.
+ *   2. Duplicate member ids are collapsed. The same pair twice would spend two
+ *      attempts on one endpoint and report a fallback that never happened.
+ *   3. Names are the identity. A route is named because the id has to be legible
+ *      in config.json and in the status report; two routes with one name are one
+ *      route, and the first one wins so a hand edit cannot produce two behaviours
+ *      behind the same word.
+ */
+function normalizeRoutes(raw) {
+  if (!Array.isArray(raw)) return []
+  const out = []
+  const seenNames = new Set()
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+    if (name === '' || seenNames.has(name)) continue
+    const members = []
+    for (const member of Array.isArray(entry.members) ? entry.members : []) {
+      const id = typeof member === 'string' ? member.trim() : ''
+      if (id === '' || members.includes(id)) continue
+      if (members.length >= HARD_MAX_ROUTE_MEMBERS) break
+      members.push(id)
+    }
+    if (members.length === 0) continue
+    seenNames.add(name)
+    out.push({
+      name,
+      members,
+      strategy: ROUTE_STRATEGIES.includes(entry.strategy) ? entry.strategy : 'fallback',
+      stickyLimit: Math.min(
+        Math.max(Math.trunc(numberOr(entry.stickyLimit, ROUTE_STICKY_DEFAULT)), 1),
+        HARD_MAX_STICKY,
+      ),
+      enabled: entry.enabled !== false,
+    })
+    if (out.length >= HARD_MAX_ROUTES) break
+  }
+  return out
+}
+
+/** Split "provider/model" into its two halves, or null when it is not one. */
+function splitPairKey(id) {
+  const text = String(id ?? '').trim()
+  const at = text.indexOf('/')
+  if (at <= 0 || at === text.length - 1) return null
+  return { provider: text.slice(0, at), model: text.slice(at + 1) }
 }
 
 /** Laplace-smoothed success rate: an untried candidate scores 0.5, not 0 or 1. */
@@ -748,8 +859,34 @@ const FAILURE_KIND_TESTS = [
   // "unsupported" rather than leaving the row unclassified. Tested after quota on
   // purpose: a plan that "does not support" a model is a billing wall, and losing
   // that classification would cost the daily rest a dead balance needs.
-  ['unsupported', /(does not support|doesn't support|unsupported|not supported|no such model|unknown model|model not found|invalid model|model is not available)/i],
-  ['auth', /(invalid[ _-]*api[ _-]*key|api[ _-]*key[ _-]*(invalid|missing|expired)|unauthori[sz]ed|unauthenticated|authentication|credential|permission denied|forbidden|401|403|鉴权|密钥|授权失败|认证失败)/i],
+  // "has no provider supported" is what the aggregate gateway answers with a 400
+  // when an id in its catalogue has no backend behind it. It names no model, no
+  // retry and no time, so it used to fall through to '' and take the ordinary
+  // exponential backoff - which put a permanently dead id back near the head of
+  // the ranking every cooldown window, and charged every turn retriesPerModel
+  // retries plus the backoff sleep before the walk moved on. Observed live on
+  // 2026-10-22: modelscope/deepseek-ai/DeepSeek-V4.1-Flash reached 24 consecutive
+  // failures on this exact sentence while lastErrorKind stayed empty.
+  // The four sentences below were read out of this install's own stats.json on
+  // 2026-10-26, where they sat unclassified next to real failures: an aggregate
+  // gateway answering "Model is unavailable", CodeArts answering "The request param
+  // is invalid", and WorkBuddy answering "请求参数错误…request illegal". Each of them
+  // is settled before the model is read, so each gets the dead-end rest rather than
+  // the half-hour backoff.
+  //
+  // "request illegal" alone is NOT one of them, and the row that taught this said
+  // so in its own words: WorkBuddy answers "请求被拦截，请重新发送 request illegal" -
+  // a block with a resend instruction, which is not the same statement as "this
+  // route can never serve this model". Giving it the six-hour dead-end rest would
+  // retire a channel that a resend may well reach. Only the *parameter* form
+  // (请求参数错误 / The request param is invalid) is a settled shape.
+  ['unsupported', /(does not support|doesn't support|unsupported|not supported|no such model|unknown model|model not found|invalid model|model is (?:not )?(?:available|unavailable)|has[ _-]+no[ _-]+provider|no[ _-]+provider[ _-]+(?:supported|available|configured)|request[ _-]+param[^.]{0,20}invalid|invalid[ _-]+request[ _-]+param|请求参数[^。，,;；]{0,8}(?:错误|非法|无效|不合法))/i],
+  // A channel that is simply not logged in says so in its own words, and 37 rows in
+  // this install carried exactly that sentence with no classification attached:
+  // "未配置凭据，请先登录" from WorkBuddy. It is an auth failure by any reading - the
+  // credential is missing, not the model - so it keeps auth's retries (a re-login or
+  // a burst-rate proxy does clear) instead of being treated as a dead route.
+  ['auth', /(invalid[ _-]*api[ _-]*key|api[ _-]*key[ _-]*(invalid|missing|expired)|unauthori[sz]ed|unauthenticated|authentication|credential|permission denied|forbidden|401|403|鉴权|密钥|授权失败|认证失败|未配置凭据|请先登录|未登录|登录已(?:失效|过期)|not logged in|login required|please (?:log|sign) in)/i],
   // An account pool that is entirely unavailable is a quota wall wearing the
   // word "rate limit". WorkBuddy answers "可用账号均在限流中，最近一个将于 … 解禁" —
   // every account exhausted, with the release timestamp in the sentence. Classified
@@ -861,6 +998,51 @@ export function parseReleaseTime(message) {
   return 0
 }
 
+/**
+ * How long a route that cannot serve this model at all is kept out of the walk.
+ *
+ * "unsupported" means the request was settled before the model was ever read:
+ * the gateway has no provider behind that id, or the provider refuses the
+ * request shape. It answers identically every time, so the exponential backoff -
+ * capped at maxCooldownMs, 30 minutes by default - was the wrong shape: the
+ * dead id returned to the ranking twice an hour, and each return cost every turn
+ * retriesPerModel retries plus the backoff sleep. Six hours keeps a genuinely
+ * misconfigured route out of the way for a working session while still letting a
+ * gateway that provisions the id overnight be picked up again the same day.
+ *
+ * Exported as a test seam: this number is policy, and a policy that only shows
+ * up as "it came back too soon" in the field should be pinned by an assertion.
+ */
+export const UNSUPPORTED_REST_MS = 6 * 60 * 60 * 1000
+
+/**
+ * How many consecutive failures make a route a breaker, and for how long it rests.
+ *
+ * The exponential backoff is capped by maxCooldownMs (30 minutes by default),
+ * which means a route that fails *every* dispatch returns to the ranking twice an
+ * hour forever. On a machine with a few hundred catalog rows that is invisible -
+ * a dead row is one quiet miss among many - but it is not invisible to the walk:
+ * every turn it comes back, it costs retriesPerModel dispatches plus the backoff
+ * sleeps before the walk moves on. Measured on 2026-10-26 in this install's own
+ * stats: one channel had 493,845 attempts and zero successes, and 46 rows had
+ * never been classified at all.
+ *
+ * So a run of failures earns a rest that is measured in hours rather than in
+ * half-hours. This is the same shape as the unsupported dead end above, but it is
+ * driven by the *counter* rather than by the words in the message: a route whose
+ * refusals we cannot classify still gets a breaker, which is the whole point -
+ * classification is best effort, the counter is measured.
+ */
+function breakerRestMs(cfg) {
+  return Math.max(cfg.maxCooldownMs, cfg.breakerRestMs)
+}
+
+/** True when this failure run has tripped the breaker. */
+export function breakerTripped(stat, cfg) {
+  const threshold = Math.max(Math.trunc(numberOr(cfg?.breakerFailures, SETTINGS_DEFAULTS.breakerFailures)), 1)
+  return Math.max(Math.trunc(numberOr(stat?.consecutiveFailures, 0)), 0) >= threshold
+}
+
 /** Instant until which this failure keeps the candidate out of the ranking. */
 function cooldownUntilFor(stat, cfg, nowMs, errorKind, message) {
   if (errorKind === 'quota') {
@@ -869,6 +1051,14 @@ function cooldownUntilFor(stat, cfg, nowMs, errorKind, message) {
     if (stated > nowMs) return stated
     return quotaRestUntil(nowMs, cfg)
   }
+  // A dead end is not a blip. Resting it for the ordinary backoff put it back in
+  // front of the reader every half hour; the floor here is the policy, and
+  // maxCooldownMs still wins when a user configures something longer.
+  if (errorKind === 'unsupported') return nowMs + Math.max(cfg.maxCooldownMs, UNSUPPORTED_REST_MS)
+  // The caller increments consecutiveFailures before calling this, so the counter
+  // already includes the failure being priced: the threshold reads as "this many
+  // failures in a row", not "one short of it".
+  if (breakerTripped(stat, cfg)) return nowMs + breakerRestMs(cfg)
   return nowMs + cooldownFor(stat, cfg)
 }
 
@@ -897,7 +1087,13 @@ function hasImagePart(messages) {
  * not a string is serialised instead.
  */
 function failureText(value, fallback) {
-  if (typeof value === 'string' && value !== '') return value
+  // A provider that reports a failure with an empty message used to produce the
+  // empty string here, and an empty string carries nothing: classifyFailureKind('')
+  // answers '', so the row was recorded as unclassified with no prose to re-read
+  // later. Measured on this install 2026-10-26: 37 of 106 stat rows held exactly
+  // that - a failure with nothing to act on. The fallback (the finish kind, then
+  // the caller's own label) is strictly more informative than silence.
+  if (typeof value === 'string') return value.trim() !== '' ? value : fallback
   if (value === undefined || value === null) return fallback
   // An Error's own toString carries its name and message; JSON.stringify would
   // return "{}" for it and lose everything, so keep the string form first.
@@ -969,6 +1165,36 @@ function formatTable(rows, headers) {
   const out = [line(headers), widths.map(w => '-'.repeat(w)).join('  ')]
   for (const row of rows) out.push(line(row))
   return out.join('\n')
+}
+
+/**
+ * Join a name list, optionally collapsed.
+ *
+ * The exclusion lists are edited by hand and grow: the status line naming every one of
+ * them was itself a wall of text, with nothing to say which entries mattered. In
+ * summary mode the first few names still identify the list while the rest becomes a
+ * count, so the line stays a readable statement about state.
+ */
+function joinNames(names, summary, keep = 4) {
+  if (!summary || names.length <= keep) return names.join(', ')
+  return names.slice(0, keep).join(', ') + ' … (+' + (names.length - keep) + ' more)'
+}
+
+/**
+ * Cut a table to its first `maxRows` rows, stating what was withheld.
+ *
+ * Silent truncation is the failure mode being avoided: a clipped ranking that does not
+ * say it was clipped reads as "these are all the routes", which is exactly the wrong
+ * conclusion for someone hunting a missing model.
+ */
+function truncateTable(text, total, maxRows) {
+  const limit = Math.trunc(numberOr(maxRows, 0))
+  if (!(limit > 0) || total <= limit) return text
+  const body = text.split('\n')
+  // Two header lines (column names plus the underline rule) are always kept.
+  const kept = body.slice(0, 2 + limit)
+  kept.push('… ' + (total - limit) + ' more row(s) withheld; ask for them by raising maxRows (0 lists all)')
+  return kept.join('\n')
 }
 
 /**
@@ -1114,6 +1340,8 @@ export function apply(ctx, config = {}, runtime = {}) {
       preferSameModel: readSetting(source.preferSameModel, undefined),
       noticeSwitch: readSetting(source.noticeSwitch, undefined),
       windowGuard: readSetting(source.windowGuard, undefined),
+      breakerFailures: readSetting(source.breakerFailures, undefined),
+      breakerRestMs: readSetting(source.breakerRestMs, undefined),
       weights: {
         connectivity: readSetting(nested.connectivity, undefined),
         speed: readSetting(nested.speed, undefined),
@@ -1204,7 +1432,18 @@ export function apply(ctx, config = {}, runtime = {}) {
       // stale. Done here (not via invalidatePairs) so this function never
       // re-enters itself.
       patternCache = compileNonChat(cached)
-      pairCache = { at: 0, pairs: [] }
+      // The discovered roster is deliberately NOT dropped here.
+      //
+      // It used to be, on the theory that a changed config makes everything derived
+      // from it stale. The roster is not derived from the config: it is the set of
+      // provider/model pairs the host publishes, and no config key can add or remove
+      // one. Dropping it made every config write - including the model list's own
+      // switches and the route editor's save - trigger a full listProviders() +
+      // listModels() sweep over hundreds of pairs before the response that write was
+      // going to answer with. Measured here: a POST took 6.3s cold and 16.2s when a
+      // second write followed, against 15ms for a GET that hit the cache. That
+      // difference is a save button sitting on its busy label for sixteen seconds,
+      // which a reader can only read as broken.
     }
     return cached
   }
@@ -1676,6 +1915,119 @@ export function apply(ctx, config = {}, runtime = {}) {
     }
   }
 
+  // ---- declared routes (borrowed from dsh-xdpool's routing page) -------------
+
+  /**
+   * Per-route rotation cursors, in memory.
+   *
+   * Not persisted on purpose, and for the reason dsh-xdpool gives for the same
+   * choice: a cursor is a scheduling detail, and restoring a stale one after a
+   * restart would silently continue a rotation the user can no longer see. Losing
+   * it costs at most one extra turn on the wrong member.
+   */
+  const routeCursors = new Map()
+
+  /** Forget the cursors of routes that no longer exist or were switched off. */
+  function pruneRouteCursors(routes) {
+    const keep = new Set(routes.filter(route => route.enabled !== false).map(route => route.name))
+    for (const name of [...routeCursors.keys()]) if (!keep.has(name)) routeCursors.delete(name)
+  }
+
+  /**
+   * The route the walk should honour, or null.
+   *
+   * A route is chosen explicitly (activeRoute) because a route is a statement
+   * about *this* conversation - "try these, in this order" - and silently
+   * preferring one of several because it happened to be first in a hand-edited
+   * file is exactly the kind of invisible decision this plugin exists to remove.
+   * An unknown or switched-off name answers null: the ranking then decides, and
+   * the status tool reports the name as ignored rather than obeyed.
+   */
+  function activeRoute(cfg) {
+    pruneRouteCursors(cfg.routes)
+    const name = String(cfg.activeRoute ?? '').trim()
+    if (name === '') return null
+    const route = cfg.routes.find(entry => entry.name === name)
+    if (route === undefined || route.enabled === false) return null
+    return route
+  }
+
+  /**
+   * The members of one route to try this turn, in order, resolved against the
+   * live roster.
+   *
+   * Two things are dropped rather than dispatched:
+   *
+   *   - a member the discovery scan does not list. A hand-typed id with a typo is
+   *     not a route; dispatching it would fail the turn on a name nobody serves
+   *     and then blame the model for it.
+   *   - a member the config excludes. The exclusion is the user's more recent
+   *     statement about that row, and a route written yesterday must not override
+   *     a channel switched off today.
+   *
+   * Only after that is the strategy applied. fallback always restarts from the
+   * head - the first member is the one the user put first, and a failure there is
+   * a reason to try the second rather than to keep hammering the first.
+   * round-robin starts from the cursor and advances it every stickyLimit turns,
+   * which is what spreads load across equivalent upstreams while keeping a
+   * multi-turn exchange on one of them.
+   */
+  function routeMembers(route, pairs, cfg, options = {}) {
+    const usable = []
+    for (const id of route.members) {
+      const wanted = splitPairKey(id)
+      if (wanted === null) continue
+      const pair = pairs.find(entry => entry.provider === wanted.provider && entry.model === wanted.model)
+      if (pair === undefined || isExcluded(pair, cfg)) continue
+      usable.push(pair)
+    }
+    if (usable.length <= 1) return usable
+    if (route.strategy !== 'round-robin') return usable
+    const cursor = routeCursors.get(route.name) ?? { index: 0, used: 0 }
+    const start = ((cursor.index % usable.length) + usable.length) % usable.length
+    const ordered = [...usable.slice(start), ...usable.slice(0, start)]
+    // A peek must not advance the cursor: the model list asks "what would be
+    // tried" while drawing, and a page refresh that rotated the walk would make
+    // the displayed order disagree with the next turn's.
+    if (options.peek === true) return ordered
+    const used = cursor.used + 1
+    const limit = route.stickyLimit > 0 ? route.stickyLimit : ROUTE_STICKY_DEFAULT
+    routeCursors.set(route.name, used >= limit
+      ? { index: (start + 1) % usable.length, used: 0 }
+      : { index: start, used })
+    return ordered
+  }
+
+  /**
+   * Which tier a candidate belongs to, in the sense the reader cares about.
+   *
+   * The measured score answers "how good does this route look", and the score
+   * alone was producing the wrong *kind* of switch: a user whose model hit a rate
+   * limit does not usually want a different model, they want *that* model through
+   * another channel. dsh-xdpool names the same idea as its "same model, different
+   * route" tier and ranks it above a cross-model fallback for a concrete reason -
+   * switching models changes the context window, the tool-calling behaviour, the
+   * structured-output shape and the writing style, so a cross-model fallback is a
+   * last resort rather than a first one.
+   *
+   * Tiers, best first:
+   *   0  the same model id on another channel (an exact sibling)
+   *   1  a close relative (shared multi-token family stem: ...-flash vs ...-pro)
+   *   2  a same-family neighbour that shares only its first token
+   *   3  unrelated
+   *
+   * preferSameModel keeps its old meaning: switch it off and every candidate is
+   * tier 3, so the ranking is left to the measurements alone.
+   */
+  function candidateTier(currentModel, candidateModel, cfg) {
+    if (cfg.preferSameModel !== true) return 3
+    const alike = modelSimilarity(currentModel, candidateModel)
+    if (alike >= 1) return 0
+    if (alike >= 0.8) return 1
+    if (alike >= 0.5) return 2
+    return 3
+  }
+
   /**
    * Rank candidates for one turn: the current model always heads the list (a
    * turn never silently starts somewhere else), then measured alternatives,
@@ -1706,9 +2058,17 @@ export function apply(ctx, config = {}, runtime = {}) {
       // tie-breaker among models worth trying, never a way to resurrect a dead
       // one (that is what the cooldown is for).
       const score = base < 0 ? base : base + sameModelBoost(current.model, pair.model, cfg)
-      ranked.push({ pair, key, score })
+      // The tier is sorted BEFORE the score, because the two answer different
+      // questions: the score says which route measured better, the tier says which
+      // route is the same model. A 0.9-scoring unrelated model overtaking a 0.7-
+      // scoring exact sibling is precisely the switch a user reads as "it changed
+      // my model for no reason". Within a tier the score decides, so measurement
+      // still orders what the tier considers equivalent.
+      ranked.push({ pair, key, score, tier: candidateTier(current.model, pair.model, cfg) })
     }
-    ranked.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    ranked.sort((a, b) => (a.tier !== b.tier
+      ? a.tier - b.tier
+      : b.score !== a.score ? b.score - a.score : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 
     // A model family contributes more than one channel - but not all of them.
     //
@@ -1741,7 +2101,21 @@ export function apply(ctx, config = {}, runtime = {}) {
       familyCount.set(family, used + 1)
       byFamily.push(row)
     }
-    const ordered = [current, ...byFamily.map(row => row.pair)]
+    // A declared route is the user's own order, so it goes in front of the measured
+    // ranking - right after the model the turn started on, which is never moved.
+    // routeMembers() advances the round-robin cursor when called without peek,
+    // because this IS the per-turn decision; the model list and the status tool pass
+    // peek:true so reading the state cannot rotate the walk.
+    const route = activeRoute(cfg)
+    const routed = route === null ? [] : routeMembers(route, pairs, cfg)
+    const ordered = [current, ...routed]
+    const placed = new Set(ordered.map(pair => pair.provider + '/' + pair.model))
+    for (const row of byFamily) {
+      const key = row.pair.provider + '/' + row.pair.model
+      if (placed.has(key)) continue
+      placed.add(key)
+      ordered.push(row.pair)
+    }
 
     // A pin short-circuits the ranking: the user asked for this head explicitly.
     //
@@ -2546,6 +2920,65 @@ export function apply(ctx, config = {}, runtime = {}) {
   }
 
   /**
+   * Choose the route the walk honours, or clear the choice.
+   *
+   * Three outcomes, each refused or accepted on its own terms:
+   *
+   *   ''                  -> clear the choice; the measured ranking decides again
+   *   a declared name     -> that route heads the walk (after the current model)
+   *   anything else       -> 400, and nothing is written
+   *
+   * A typo must not be stored as an active route: it would read as "a route is in
+   * force" in every report while the ranking quietly decided everything.
+   */
+  function setActiveRoute(name) {
+    const wanted = typeof name === 'string' ? name.trim() : ''
+    readFileLayer()
+    const declared = normalizeRoutes(cachedFile?.routes)
+    if (wanted !== '' && !declared.some(route => route.name === wanted)) {
+      return { ok: false, error: 'no route named \"' + wanted + '\" in config.json' }
+    }
+    const written = persistConfig({ activeRoute: wanted })
+    return { ok: true, activeRoute: wanted, persisted: written }
+  }
+  
+  /**
+   * Replace the whole route list.
+   *
+   * A whole-list replace, not a per-route patch, for the reason dsh-xdpool gives
+   * for the same choice: the editor's unit of work is one route, and a patch that
+   * names routes cannot tell "this row moved down" from "that row was deleted and
+   * another re-created" once two routes share a name. One write also means one
+   * normalisation pass, so a route the catalogs can never serve is never stored.
+   *
+   * An active route that disappears from the new list is cleared in the SAME
+   * write. Leaving the name behind would make every later report read
+   * "(not declared - ignored)" - a state the user never asked for and cannot
+   * explain from the page they just used.
+   */
+  function setRoutes(list) {
+    const normalized = normalizeRoutes(list)
+    if (Array.isArray(list) && list.length > 0 && normalized.length === 0) {
+      // Every submitted route was unusable (no name, or no members). Refusing is
+      // the honest answer: writing an empty list would read as "you deleted them
+      // all", which is not what was asked.
+      return { ok: false, error: 'no usable route in the submitted list' }
+    }
+    readFileLayer()
+    const active = String(cachedFile?.activeRoute ?? '').trim()
+    const patch = { routes: normalized }
+    const activeSurvives = active !== '' && normalized.some(route => route.name === active)
+    if (!activeSurvives && active !== '') patch.activeRoute = ''
+    const written = persistConfig(patch)
+    return {
+      ok: true,
+      routes: normalized,
+      activeRoute: activeSurvives ? active : '',
+      persisted: written,
+    }
+  }
+
+  /**
    * Switch a whole provider channel off or on.
    *
    * One entry for the channel, not one per model: the channel is the unit the
@@ -2602,11 +3035,16 @@ export function apply(ctx, config = {}, runtime = {}) {
             if (method === 'POST') {
               const body = await readJsonBody(req)
               const key = typeof body.key === 'string' ? body.key : ''
-              // Two scopes, one route: "provider" switches a whole channel, the
-              // default switches one model row.
+              // One route, three scopes: "provider" switches a whole channel, "route"
+              // chooses which declared order the walk honours (a name, not a model),
+              // and the default switches one model row.
               const result = body.scope === 'provider'
                 ? setProviderEnabled(key, body.enabled !== false)
-                : setModelEnabled(key, body.enabled !== false)
+                : body.scope === 'route'
+                  ? setActiveRoute(key)
+                  : body.scope === 'routes'
+                    ? setRoutes(Array.isArray(body.routes) ? body.routes : [])
+                    : setModelEnabled(key, body.enabled !== false)
               if (result.ok !== true) {
                 sendJson(res, 400, result)
                 return
@@ -2700,6 +3138,10 @@ export function apply(ctx, config = {}, runtime = {}) {
     { key: 'preferSameModel', path: 'preferSameModel', read: cfg => cfg.preferSameModel },
     { key: 'noticeSwitch', path: 'noticeSwitch', read: cfg => cfg.noticeSwitch },
     { key: 'windowGuard', path: 'windowGuard', read: cfg => cfg.windowGuard },
+    { key: 'breakerFailures', path: 'breakerFailures', read: cfg => cfg.breakerFailures },
+    { key: 'breakerRestMs', path: 'breakerRestMs', read: cfg => cfg.breakerRestMs },
+    { key: 'activeRoute', path: 'activeRoute', read: cfg => (cfg.activeRoute === '' ? '(none)' : cfg.activeRoute) },
+    { key: 'routes', path: 'routes', read: cfg => (cfg.routes.length === 0 ? '(none)' : cfg.routes.length + ' declared') },
     { key: 'weights.connectivity', path: 'weights.connectivity', read: cfg => cfg.weights.connectivity },
     { key: 'weights.speed', path: 'weights.speed', read: cfg => cfg.weights.speed },
     { key: 'disabledModels', path: 'disabledModels', read: cfg => (cfg.disabledModels.length === 0 ? '(none)' : cfg.disabledModels.length + ' entry') },
@@ -2847,10 +3289,33 @@ export function apply(ctx, config = {}, runtime = {}) {
       group.resting = group.channels.reduce((sum, channel) => sum + channel.resting, 0)
       group.off = group.channels.reduce((sum, channel) => sum + channel.off, 0)
     }
+    // The declared routes, resolved against this roster. The page draws them and
+    // says which one is in force; a member that left the roster is reported as
+    // missing rather than dropped silently, because "my order was obeyed" and "a
+    // different model answered" must not look the same.
+    const route = activeRoute(cfg)
+    const routeRows = cfg.routes.map(entry => {
+      const usable = routeMembers(entry, all, cfg, { peek: true })
+      const usableKeys = new Set(usable.map(pair => pair.provider + '/' + pair.model))
+      return {
+        name: entry.name,
+        strategy: entry.strategy,
+        stickyLimit: entry.stickyLimit,
+        enabled: entry.enabled !== false,
+        active: route !== null && route.name === entry.name,
+        members: entry.members.map(id => ({
+          key: id,
+          usable: usableKeys.has(id),
+        })),
+        usableCount: usable.length,
+      }
+    })
     return {
       at: nowMs,
       total: rows.length,
       inRotation: rows.filter(row => row.inRotation).length,
+      routes: routeRows,
+      activeRoute: route === null ? '' : route.name,
       // Deliberately no cfg: the page already has every setting through the
       // form, and the roster's own answer is the roster.
       groups,
@@ -2879,7 +3344,10 @@ export function apply(ctx, config = {}, runtime = {}) {
           stat.empty,
           median(stat.ttftMs) ?? '-',
           cooling ? (stat.lastErrorKind === 'quota' ? 'QUOTA-REST' : 'COOLDOWN') : '-',
-          stat.lastErrorKind === '' ? '-' : stat.lastErrorKind,
+          // A resting row must name why it rests. Printing '-' next to an active
+          // COOLDOWN read as "no reason on record", and the type column is exactly
+          // what a reader checks before switching a model off by hand.
+          stat.lastErrorKind === '' ? (cooling ? 'unclassified' : '-') : stat.lastErrorKind,
           cooling ? Math.ceil((stat.cooldownUntil - nowMs) / 60000) + 'm' : '-',
           scoreCandidate(stat, cfg, nowMs).toFixed(3),
         ]
@@ -2946,10 +3414,30 @@ export function apply(ctx, config = {}, runtime = {}) {
     name: 'model_rotator_status',
     description:
       'Report the model-rotator state: whether failover is enabled, where its config lives, the model this session is using now, every discovered model, and the measured ranking (attempts, successes, failures, median TTFT, active cooldown, score). Read-only: it changes no model or provider configuration.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    // The ranking is one row per discovered route. On a machine with several hundred
+    // pairs that single table dominated the tool result, so the two optional controls
+    // exist to ask for less rather than to make the default smaller: a caller inspecting
+    // one model needs the whole list, and silently clipping it would hide the very row
+    // being looked for. maxRows <= 0 keeps every row and remains the default.
+    parameters: {
+      type: 'object',
+      properties: {
+        maxRows: {
+          type: 'number',
+          description: 'Truncate the ranking table to this many highest-scoring rows (0 = every discovered route, the default). The elided count is reported.',
+        },
+        summary: {
+          type: 'boolean',
+          description: 'Collapse the long disabled-model and disabled-channel lists to a few names plus a count, for a compact read (default false: every name is listed).',
+        },
+      },
+      additionalProperties: false,
+    },
     output: stringOutput,
-    async execute() {
+    async execute(args) {
       const { cfg, rows, pairs } = await rankingReport()
+      const compact = args?.summary === true
+      const maxRows = numberOr(args?.maxRows, 0)
       const shadowed = pageKeysInFile()
       // When schemastery did not load, the first and last probe entries name the
       // reason, so the settings page can be diagnosed without another restart.
@@ -2984,8 +3472,28 @@ export function apply(ctx, config = {}, runtime = {}) {
           const cooling = stat !== null && stat.cooldownUntil > Date.now()
           return pinned + (cooling ? ' (cooling down - ignored for now)' : '')
         })(),
-        '  disabled models  : ' + (cfg.disabledModels.length === 0 ? '(none)' : cfg.disabledModels.join(', ')),
-        '  disabled channels: ' + (cfg.disabledProviders.length === 0 ? '(none)' : cfg.disabledProviders.join(', ')),
+        // The route the walk actually honours, and why it might not be the one the
+        // file names: an unknown or switched-off name is reported as ignored rather
+        // than obeyed, because "the route was set" and "the route is in force" are
+        // different statements and only the second one explains the next turn.
+        '  active route     : ' + (() => {
+          const name = String(cfg.activeRoute ?? '').trim()
+          if (name === '') return '(none; the measured ranking decides)'
+          const declared = cfg.routes.find(entry => entry.name === name)
+          if (declared === undefined) return name + ' (not declared - ignored)'
+          if (declared.enabled === false) return name + ' (switched off - ignored)'
+          const usable = routeMembers(declared, pairCache.pairs, cfg, { peek: true })
+          const missing = declared.members.filter(id => !usable.some(pair => pair.provider + '/' + pair.model === id))
+          return name + ' (' + declared.strategy + ', ' + usable.length + '/' + declared.members.length + ' members usable'
+            + (missing.length === 0 ? '' : '; not dispatched: ' + joinNames(missing, compact)) + ')'
+        })(),
+        '  routes declared  : ' + (cfg.routes.length === 0
+          ? '(none; set routes + activeRoute in config.json to pin an order)'
+          : cfg.routes.map(route => route.name + ' [' + route.strategy + (route.strategy === 'round-robin' ? ' x' + route.stickyLimit : '') + ']' + (route.enabled === false ? ' (off)' : '')).join(', ')),
+        '  breaker          : after ' + cfg.breakerFailures + ' consecutive failures a route rests '
+          + Math.round(Math.max(cfg.maxCooldownMs, cfg.breakerRestMs) / 60000) + 'min (a run we cannot classify still counts)', 
+        '  disabled models  : ' + (cfg.disabledModels.length === 0 ? '(none)' : joinNames(cfg.disabledModels, compact)),
+        '  disabled channels: ' + (cfg.disabledProviders.length === 0 ? '(none)' : joinNames(cfg.disabledProviders, compact)),
         // Named here because the symptom is confusing: a model the user can see in
         // the directory is absent from the ranking, and only this rule explains it.
         '  switch notice    : ' + (cfg.noticeSwitch
@@ -3040,7 +3548,9 @@ export function apply(ctx, config = {}, runtime = {}) {
           '; the settings page wins for those keys.',
         )
       }
-      lines.push('', rows.length === 0 ? '(no candidates discovered)' : formatTable(rows, RANK_HEADERS))
+      lines.push('', rows.length === 0
+        ? '(no candidates discovered)'
+        : truncateTable(formatTable(rows, RANK_HEADERS), rows.length, maxRows))
       return lines.join('\n')
     },
   })

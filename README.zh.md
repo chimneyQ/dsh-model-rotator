@@ -17,6 +17,35 @@
 5. **先重试，再判死**：渠道瞬时抽风很常见（限流毛刺、连接被重置、信道过载），所以单次失败不算故障。同一个模型还会按 `retriesPerModel` 再试几次（默认 2 次，可设 0–5），每次间隔 `retryBackoffMs`（默认 300ms，之后翻倍）。**重试不等于切换**——它不问你、也不改任何状态。
 6. **真的换**：在 `llm/stream` 瀑布上接管。第一次尝试走宿主原路径；只有当这次失败**一个字的正文都没产出**时，才放弃这次尝试、关掉它的上游流，用全新的 `ctx.llm.stream()` 重新下发下一候选。
 
+
+### 也可以自己指定顺序：路由链
+
+前面那套是「让插件替你决定」。如果你已经知道该按什么顺序试，就在 `model-rotator/config.json` 里写一条路由（借鉴自 [dsh-xdpool](https://github.com/XDTrees/dsh-xdpool) 的「路由」页）：
+
+```json
+{
+  "routes": [
+    { "name": "写稿", "members": ["modelscope/deepseek-ai/DeepSeek-V4.1-Flash", "trae/deepseek-v4.1-flash"], "strategy": "fallback" },
+    { "name": "spread", "members": ["provA/x", "provB/x"], "strategy": "round-robin", "stickyLimit": 3 }
+  ],
+  "activeRoute": "写稿"
+}
+```
+
+| 项 | 含义 |
+|----|------|
+| `strategy: "fallback"` | 每轮都从头开始。第一项永远是你放在第一位的那个；它失败才轮到下一个 |
+| `strategy: "round-robin"` | 从游标开始，每 `stickyLimit` 轮前进一格。适合同一个模型有多个等价上游：一个挨限流时换下一个，多轮对话又不会被打散 |
+| `activeRoute` | 哪条路由生效。写了一个不存在的名字时状态里会明确写「ignored」，而不是假装它在生效 |
+
+三条边界，是这套东西能信的前提：
+
+- **当前模型永远排在最前。** 路由只决定它之后是什么。写一条链不等于换掉你正在用的模型——那件事只有失败并且你同意（或配额耗尽）时才会发生。
+- **成员按实时名册解析。** 手写笔误的 id、被 `disabledProviders` / `disabledModels` 挡住的成员一律不派发，状态里会列出「not dispatched: …」。一条静默变短的链是最坏的情况：你以为按你的顺序走了，实际上别的模型答的。
+- **游标不落盘。** 重启后 round-robin 从第一位重新开始。这是有意的：恢复一个陈旧的游标，等于让你看不见的轮换继续跑。
+
+设置页的模型列表上方就是**路由编辑器**：新建/重命名/删除、上下移动路由与成员、切换 `fallback`/`round-robin`（含连任轮数 `stickyLimit`）、启用停用、以及「设为当前」。成员输入框带实时名册的 datalist 补全，输入名册里没有的 id 仍会被接受（名册可能还没加载完），但会当场标红提示「不在候选里」，而不是静默丢掉。改动先在本地草稿里累积，点「保存路由」才整表写盘——路由的内容就是顺序，而顺序要挪好几步才排好，把半成品写进磁盘等于把下一轮指向错误模型。
+
 ### 两条边界，是整件事的关键
 
 **已经出过正文就不再重试。** 一旦有任何正文分片吐给用户，这次尝试就锁死了——再试一遍会让用户看到重复的文字。所以「可重试窗口」精确等于「零内容窗口」。
@@ -132,6 +161,21 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
   model list route : /_dsh/model-rotator/models (GET the grouped list; POST {key, enabled} to switch one off or on)
 ```
 
+### 排名表很大时怎么少看点
+
+排名表是**每条已发现路由一行**。在配了很多 provider 的机器上（本机实测 488 对），这一张表会独占整个工具结果——而工具结果是要进对话上下文的。
+
+所以状态工具有两个可选参数：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `maxRows` | `0` | 只保留分数最高的前 N 行；**0 = 全部**（默认，不裁剪）。被裁掉的行数会明说，不会静默丢弃。 |
+| `summary` | `false` | 把冗长的 `disabled models` / `disabled channels` 清单折成前几个名字加计数。 |
+
+默认**不裁剪**是刻意的：一个没说明就被截断的排名，读起来像「这就是全部路由」，而这恰恰是正在找一个失踪模型的人会得出的错误结论。裁剪时一定附一行 `… N more row(s) withheld`。
+
+如果你只是想知道状态而不是逐条核对，`maxRows: 20` 通常就够，配合 `summary: true` 能把输出压到原来的零头。
+
 ## 配置
 
 可选，路径 `%DSH_HOME%\model-rotator\config.json`，改完即热加载。每个字段都有安全默认值，所以**完全不建这个文件也能跑**。
@@ -159,7 +203,13 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
   "disabledModels": [],
   "enabledModels": [],
   "disabledProviders": [],
-  "pinned": ""
+  "pinned": "",
+  "breakerFailures": 5,
+  "breakerRestMs": 21600000,
+  "routes": [
+    { "name": "写稿", "members": ["modelscope/deepseek-ai/DeepSeek-V4.1-Flash", "trae/deepseek-v4.1-flash"], "strategy": "fallback" }
+  ],
+  "activeRoute": ""
 }
 ```
 
@@ -185,6 +235,8 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
 - `disabledProviders` —— 在渠道表头上点「关闭本渠道」关掉的整条渠道，一条记录一个 provider id。关闭渠道时会一并清掉该渠道内遗留的逐行 `enabledModels`，免得按钮被静默撤销；此后单独开启某一行会写一条新记录，照样生效。
 - `enabledModels` —— 相反方向。也是当某个 wrapper 命名不符合 `<provider>-vision` 约定时，把识图孪生单独放回轮转的**唯一方式**。由同一个开关写入。
 - `pinned` —— 转移顺序的优先队首。
+- `routes` / `activeRoute` —— 自己指定尝试顺序，见上面的「路由链」。一条路由 `{name, members, strategy, stickyLimit, enabled}`；`fallback` 每轮从头，`round-robin` 按 `stickyLimit` 轮换。成员按实时名册解析，解析不了的不派发也不许静默变短。
+- `breakerFailures` / `breakerRestMs` —— 连续失败到 `breakerFailures`（默认 5）次就让这条路由整段休息 `breakerRestMs`（默认 6 小时，实际不小于 `maxCooldownMs`）。按次数判而不是按报错文字判：分类是尽力而为，计数器是真测量。
 
 ## 设置页与模型列表
 
@@ -265,6 +317,10 @@ model_rotator_status      # 看 "discovered" 一行，那就是过滤后的候�
 
 `model_rotator_status` 的最后有一块 **in force right now**，逐行列出每个生效键的合并值与它来自哪一层（`[default]` / `[config.json]` / `[settings page]`），不用你自己读两个文件在脑子里做合并。再后面几行给出实时画面：`ask channel`（切换前的问句到底能不能送达你，不能的话为什么）、`adopt on switch`、`model in use now`（从本会话请求头读）、`session switch`、`failure verdict`、`switch order`。
 
+
+**场景 25** 是路由链与熔断。两者都是策略，而只在现场表现为「它怎么这么快又回来了」的策略，正应该在这里被钉死：声明的路由先于测量排行被尝试、而当前模型永远排最前；`fallback` 下一轮从头部重来，`round-robin` 推进游标，`stickyLimit` 恰好让一个成员连任那么多轮；文件里没声明的 `activeRoute` 报告为 `ignored`；名册里没有的成员从不派发，并在 `not dispatched` 里点名。熔断通过导出的 `breakerTripped()` 接缝（阈值之下、正好在阈值）和报告两侧断言——它的全部意义就在于「认不出的失败也要计入」：分类是尽力而为，计数器是真测量。**25h** 钉住从本机 `stats.json` 里取出的那四句真实报错；**25h2** 钉住那个不该被分类的：「请求被拦截，请重新发送」是一次拦截，不是一条死路由——按死路由休息六小时，会退休掉一条重发就可能通的渠道。
+
+测试本身也留下一条值得记的教训：早先这组路由夹具在 `apply()` 之后立刻恢复了 `DSH_MODEL_ROTATOR_CONFIG`，而插件是到第一次轮次才去读那个路径的——于是每条路由断言都在读一个不存在的文件，功能看起来完全没生效。环境变量是进程级的，谁把它指到别处，就得等自己的断言跑完再还回去。
 ## 安装
 
 从 npm 安装（推荐）：

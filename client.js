@@ -30,6 +30,10 @@ window.__ModuleLoader__.load({
       "noticeSwitch": "在对话中提示切换（默认关）",
       "noticeSwitchHint": "切换记录已显示在「模型切换」页签；打开此项才会额外在对话里插入一行上下文通知（通知行不触发新的模型调用）。",
       "windowGuard": "跳过放不下当前对话的模型（默认开）",
+      "breakerFailures": "连续失败几次后长时间休息（熔断）",
+      "breakerFailuresHint": "一条路由连续失败到这个次数，就按下面的时长整段休息，而不是继续按最长 30 分钟退避反复回到候选里。按「次数」而不是按报错文字判定：认不出来的报错同样计入，因为次数是真测量、分类只是尽力而为。",
+      "breakerRestMs": "熔断休息时长（毫秒）",
+      "breakerRestMsHint": "触发熔断后要休息多久。实际取它与 maxCooldownMs 中较大的一个，所以把 maxCooldownMs 设得更长仍然以它为准。",
       "windowGuardHint": "候选模型的上下文窗口装不下「当前对话 + 本轮回复」时直接跳过：切过去请求会超窗直接失败，而用来缩身的压缩也跑不动（摘要同样要发给该模型）。新对话不受影响。",
       "preferSameModel": "优先同名模型",
       "preferSameModelHint": "换模型时先试其他渠道的同名模型，再试相近型号，最后才按测量排名。",
@@ -105,6 +109,38 @@ window.__ModuleLoader__.load({
       "models.lastError": "最近错误",
       "models.never": "没有测量记录",
       "models.readOnly": "config.json 不可写，这次改动只对当前进程有效。",
+      "route.title": "路由（把几个模型串成一条链）",
+      "route.hint": "路由写在 config.json 的 routes 里，选中哪条就按它的顺序优先尝试；当前模型永远排在最前，不会因为路由而被换掉。",
+      "route.none": "还没有声明路由。在 config.json 里加 routes + activeRoute，就能指定一条固定的尝试顺序。",
+      "route.active": "当前生效",
+      "route.use": "设为当前",
+      "route.clear": "取消路由",
+      "route.off": "已停用",
+      "route.fallback": "顺序",
+      "route.round-robin": "轮换",
+      "route.memberCount": "{n} 个成员，{ok} 个可用",
+      "route.missing": "不在候选里：{names}",
+      "route.switched": "已切换路由",
+      "route.failed": "切换路由失败：",
+      "route.new": "新建路由",
+      "route.save": "保存路由",
+      "route.saving": "保存中…",
+      "route.saved": "路由已保存",
+      "route.discard": "放弃修改",
+      "route.delete": "删除",
+      "route.newName": "新路由",
+      "route.name": "名称",
+      "route.strategy": "策略",
+      "route.inOrder": "顺序",
+      "route.roundRobin": "轮换",
+      "route.stickyLimit": "连任轮数",
+      "route.enabled": "启用",
+      "route.members": "成员（按顺序）",
+      "route.memberAdd": "加入",
+      "route.memberRemove": "移除",
+      "route.memberMissing": "不在候选里",
+      "route.memberPlaceholder": "输入或从列表选择 provider/model，回车加入",
+      "route.empty": "还没有路由。新建一条，把几个模型按你要的顺序串起来。",
       "models.writeFailed": "写入 config.json 失败，改动未保存。",
       "switches.tab": "模型切换",
       "switches.title": "本对话的模型切换",
@@ -146,6 +182,10 @@ window.__ModuleLoader__.load({
       "noticeSwitch": "Announce a switch in the conversation (off by default)",
       "noticeSwitchHint": "Switches are listed on the Model switches tab; turning this on additionally inserts one context row in the conversation (the row triggers no model call).",
       "windowGuard": "Skip models too small for this conversation (on by default)",
+      "breakerFailures": "Consecutive failures before a long rest (breaker)",
+      "breakerFailuresHint": "How many consecutive failures make a route rest for the whole duration below, instead of returning to the ranking every capped 30 minutes. It is counted, not read out of the error: a run we cannot classify still counts, because the counter is measured and the classification is best effort.",
+      "breakerRestMs": "Breaker rest, in milliseconds",
+      "breakerRestMsHint": "How long a tripped route rests. The larger of this and maxCooldownMs is used, so a longer maxCooldownMs still wins.",
       "windowGuardHint": "A candidate whose context window cannot hold the conversation as it stands plus this turn's reply is skipped: the request would overflow and fail, and the compaction that could have shrunk it cannot run either, because the summary goes to that same model. A fresh conversation is unaffected.",
       "preferSameModel": "Prefer the same model elsewhere",
       "preferSameModelHint": "Try the same model on another provider first, then close relatives, and only then the measured ranking.",
@@ -221,6 +261,38 @@ window.__ModuleLoader__.load({
       "models.lastError": "last error",
       "models.never": "no measurements yet",
       "models.readOnly": "config.json is not writable; this change applies to the running process only.",
+      "route.title": "Routes (a chain of models tried in order)",
+      "route.hint": "Routes live in routes in config.json. The chosen one is tried first, in its own order; the model the turn started on always stays first and is never replaced by a route.",
+      "route.none": "No route declared yet. Add routes and activeRoute to config.json to pin an order.",
+      "route.active": "in force",
+      "route.use": "Use this route",
+      "route.clear": "Clear the route",
+      "route.off": "disabled",
+      "route.fallback": "in order",
+      "route.round-robin": "round-robin",
+      "route.memberCount": "{n} member(s), {ok} usable",
+      "route.missing": "not a candidate: {names}",
+      "route.switched": "Route switched",
+      "route.failed": "Could not switch the route: ",
+      "route.new": "New route",
+      "route.save": "Save routes",
+      "route.saving": "Saving…",
+      "route.saved": "Routes saved",
+      "route.discard": "Discard changes",
+      "route.delete": "Delete",
+      "route.newName": "New route",
+      "route.name": "Name",
+      "route.strategy": "Strategy",
+      "route.inOrder": "in order",
+      "route.roundRobin": "round-robin",
+      "route.stickyLimit": "Turns per member",
+      "route.enabled": "Enabled",
+      "route.members": "Members (in order)",
+      "route.memberAdd": "Add",
+      "route.memberRemove": "Remove",
+      "route.memberMissing": "not a candidate",
+      "route.memberPlaceholder": "Type or pick a provider/model, Enter to add",
+      "route.empty": "No route yet. Create one to string several models together in your own order.",
       "models.writeFailed": "Writing config.json failed; the change was not saved.",
       "switches.tab": "Model switches",
       "switches.title": "Model switches in this conversation",
@@ -268,6 +340,8 @@ window.__ModuleLoader__.load({
   { field: 'retryBackoffMs', kind: 'number', label: 'retryBackoffMs', hint: 'retryBackoffMsHint' },
   { field: 'preferSameModel', kind: 'bool', label: 'preferSameModel', hint: 'preferSameModelHint' },
   { field: 'noticeSwitch', kind: 'bool', label: 'noticeSwitch', hint: 'noticeSwitchHint' },
+  { field: 'breakerFailures', kind: 'number', label: 'breakerFailures', hint: 'breakerFailuresHint' },
+  { field: 'breakerRestMs', kind: 'number', label: 'breakerRestMs', hint: 'breakerRestMsHint' },
   { field: 'windowGuard', kind: 'bool', label: 'windowGuard', hint: 'windowGuardHint' },
   { field: 'adoptSwitchedModel', kind: 'bool', label: 'adoptSwitchedModel', hint: 'adoptSwitchedModelHint' },
   { field: 'cooldownBaseMs', kind: 'number', label: 'cooldownBaseMs', hint: 'cooldownBaseMsHint' },
@@ -369,6 +443,31 @@ window.__ModuleLoader__.load({
     const modelMetaStyle = { fontSize: "11px", opacity: 0.65, flex: "0 0 auto", textAlign: "right" };
     const dotStyle = (health) => ({ width: "8px", height: "8px", borderRadius: "50%", background: HEALTH_COLOR[health] ?? HEALTH_COLOR.unknown, flex: "0 0 auto" });
     const badgeStyle = (health) => ({ fontSize: "11px", color: HEALTH_COLOR[health] ?? HEALTH_COLOR.unknown, flex: "0 0 auto", minWidth: "4.5em" });
+    const routesStyle = { marginTop: "14px", paddingTop: "10px", borderTop: "1px dashed rgba(128,128,128,0.3)" };
+    const routeTitleStyle = { fontSize: "13px", fontWeight: 600 };
+    const routeHintStyle = { fontSize: "12px", opacity: 0.7, margin: "4px 0 8px", maxWidth: "46em" };
+    // Deliberately NOT the model row's shape. The suite (and, more importantly, a
+    // reader) distinguishes "one model row" from "one route row" by their geometry;
+    // giving both the same flex/gap/border triple made a route row count as a model
+    // row and every filter assertion report one row too many.
+    const routeRowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "6px 0", borderTop: "1px dotted rgba(128,128,128,0.18)" };
+    const routeNameStyle = { fontFamily: "monospace", fontSize: "12px" };
+    const routeActiveStyle = { fontSize: "11px", padding: "0 6px", borderRadius: "9px", background: "rgba(64,160,96,0.18)" };
+    const routeMetaStyle = { fontSize: "11px", opacity: 0.72 };
+    const routeMissingStyle = { fontSize: "11px", color: "rgba(200,120,40,0.95)" };
+    /** The fold chevron of one route: a button that reads as text. */
+    // Not monospace: that face is the model id's signature on this page, and a
+    // chevron wearing it reads as another model row.
+    const routeFoldStyle = { background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: 0, fontSize: "12px" };
+    /** The expanded editor body, indented under its own header. */
+    const routeBodyStyle = { padding: "8px 0 10px 14px", marginTop: "4px", borderLeft: "2px solid rgba(128,128,128,0.2)" };
+    const routeFieldLabel = { fontSize: "11px", opacity: 0.65, whiteSpace: "nowrap" };
+    /** A member id inside the editor: an id, but not a roster row. */
+    const routeMemberStyle = { fontSize: "12px", wordBreak: "break-all" };
+    // Likewise not monospace: the order index is a counter, not an id.
+    const routeOrderStyle = { fontSize: "11px", opacity: 0.55, flex: "0 0 2em", textAlign: "right" };
+    /** A native select, styled to match the search box. */
+    const selectStyle = { padding: "4px 6px", fontSize: "12px", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", background: "transparent", color: "inherit" };
     const smallButtonStyle = { background: "transparent", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", color: "inherit", cursor: "pointer", fontSize: "11px", padding: "2px 8px", flex: "0 0 auto" };
     const disclosureStyle = { display: "flex", alignItems: "baseline", gap: "6px", width: "100%", background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: "4px 0", textAlign: "left", font: "inherit" };
     const chevronStyle = { fontSize: "10px", opacity: 0.7, width: "1em", flex: "0 0 auto" };
@@ -401,6 +500,291 @@ window.__ModuleLoader__.load({
      * saved together. Keeping it out of the staged form also means a refresh
      * cannot silently discard a half-typed number above it.
      */
+    /**
+     * The routing editor.
+     *
+     * dsh-xdpool's routing page is a two-level editor: platform groups, then the
+     * models inside them, saved as one table. This is the single-level equivalent -
+     * one route is one ordered list of provider/model ids - and the reason it exists
+     * at all is that a route is the one setting a file cannot carry well: order is
+     * its entire content, and order is what a text editor makes you retype.
+     *
+     * What it deliberately does NOT do:
+     *
+     *   - it does not invent ids. Members are typed against a datalist built from the
+     *     live roster; a value the roster does not know is still allowed (the roster
+     *     may not have loaded yet) but it is shown in place with a warning, never
+     *     silently dropped - a chain that silently shrinks is the failure this whole
+     *     feature exists to prevent.
+     *   - it does not save on every keystroke. Drafts stay local until 保存路由: a
+     *     route is a table reordered in several steps, and a half-reordered table
+     *     written to disk is a turn pointed at the wrong model.
+     *   - it does not reorder members by measurement. The order is the user's.
+     */
+    function RouteEditor(props) {
+      const t = props.t;
+      const rosterKeys = props.rosterKeys;
+      const saved = props.routes;
+      const [drafts, setDrafts] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [note, setNote] = React.useState("");
+      const [openAt, setOpenAt] = React.useState(-1);
+
+      const rows = drafts === null ? saved : drafts;
+      const dirty = drafts !== null;
+
+      /** Work on a copy, so an abandoned edit leaves nothing behind. */
+      const edit = (fn) => {
+        setDrafts((prev) => {
+          const base = (prev === null ? saved : prev).map((route) => ({
+            ...route,
+            members: [...(route.members || [])],
+          }));
+          fn(base);
+          return base;
+        });
+        setNote("");
+      };
+
+      const addRoute = () => {
+        const base = (drafts === null ? saved : drafts).map((route) => ({ ...route, members: [...(route.members || [])] }));
+        const taken = new Set(base.map((route) => route.name));
+        let n = base.length + 1;
+        while (taken.has(t("route.newName") + " " + n)) n += 1;
+        base.push({ name: t("route.newName") + " " + n, members: [], strategy: "fallback", stickyLimit: 1, enabled: true });
+        setDrafts(base);
+        setOpenAt(base.length - 1);
+        setNote("");
+      };
+
+      const save = () => {
+        setBusy(true);
+        setNote("");
+        // The payload is built and handed over inside an async IIFE, not as an
+        // argument to Promise.resolve().save(): a synchronous throw from the caller
+        // would escape BEFORE the promise existed, leaving the button stuck on
+        // "saving…" forever with no message - a control that reported progress it was
+        // never making. Everything, including the argument construction, is inside
+        // the try.
+        const settle = (async () => props.save(rows.map((route) => ({
+          name: route.name,
+          members: route.members,
+          strategy: route.strategy,
+          stickyLimit: route.stickyLimit,
+          enabled: route.enabled !== false,
+        }))))();
+        Promise.resolve(settle)
+          .then((result) => {
+            setBusy(false);
+            if (result === null || typeof result !== "object" || result.ok !== true) {
+              setNote(t("route.failed") + String((result && result.error) || ""));
+              return;
+            }
+            setDrafts(null);
+            setNote(t("route.saved"));
+          })
+          .catch((error) => { setBusy(false); setNote(t("route.failed") + String((error && error.message) || error)); });
+      };
+
+      const routeNodes = rows.length === 0
+        ? [jsx("div", { key: "empty", style: routeHintStyle, children: t("route.empty") })]
+        : rows.map((route, index) => {
+            const members = Array.isArray(route.members) ? route.members : [];
+            const lost = members.filter((id) => rosterKeys.length > 0 && !rosterKeys.includes(id));
+            const expanded = openAt === index;
+            const head = jsxs("div", {
+              key: "head",
+              style: routeRowStyle,
+              children: [
+                jsxs("div", {
+                  key: "text",
+                  style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 },
+                  children: [
+                    jsxs("div", {
+                      key: "name",
+                      style: { display: "flex", alignItems: "baseline", gap: "6px", flexWrap: "wrap" },
+                      children: [
+                        jsx("button", {
+                          key: "fold",
+                          type: "button",
+                          style: routeFoldStyle,
+                          onClick: () => setOpenAt(expanded ? -1 : index),
+                          children: (expanded ? "\u25BC " : "\u25B6 ") + route.name
+                        }),
+                        route.active ? jsx("span", { key: "a", style: routeActiveStyle, children: t("route.active") }) : null,
+                        // The usable count is shown for saved and for drafted routes alike:
+                        // it is derived from the live roster either way, so it answers the same
+                        // question ("would this be dispatched") while a draft is open.
+                        jsx("span", { key: "n", style: routeMetaStyle, children: fill(t("route.memberCount"), { n: members.length, ok: props.usableCount(route) }) })
+                      ].filter((child) => child !== null)
+                    }),
+                    jsx("div", {
+                      key: "meta",
+                      style: routeMetaStyle,
+                      children: [
+                        route.strategy === "round-robin" ? t("route.roundRobin") + " x" + route.stickyLimit : t("route.inOrder"),
+                        route.enabled === false ? t("route.off") : ""
+                      ].filter((part) => part !== "").join(" \u00b7 ")
+                    }),
+                    lost.length === 0 ? null : jsx("div", { key: "lost", style: routeMissingStyle, children: fill(t("route.missing"), { names: lost.join(", ") }) })
+                  ].filter((child) => child !== null)
+                }),
+                jsxs("div", {
+                  key: "acts",
+                  style: { display: "flex", alignItems: "center", gap: "6px", flex: "0 0 auto" },
+                  children: [
+                    jsx("button", { key: "up", type: "button", style: smallButtonStyle, disabled: index === 0, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index - 1, 0, m) }), children: "\u2191" }),
+                    jsx("button", { key: "down", type: "button", style: smallButtonStyle, disabled: index === rows.length - 1, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index + 1, 0, m) }), children: "\u2193" }),
+                    jsx("button", { key: "use", type: "button", style: smallButtonStyle, disabled: busy || route.enabled === false, onClick: () => props.activate(route.active ? "" : route.name), children: route.active ? t("route.clear") : t("route.use") }),
+                    jsx("button", { key: "del", type: "button", style: smallButtonStyle, disabled: busy, onClick: () => { edit((base) => { base.splice(index, 1) }); setOpenAt(-1) }, children: t("route.delete") })
+                  ]
+                })
+              ]
+            });
+            const body = expanded
+              ? jsxs("div", {
+                  key: "body",
+                  style: routeBodyStyle,
+                  children: [
+                    jsxs("div", {
+                      key: "fields",
+                      style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
+                      children: [
+                        jsx("span", { key: "ln", style: routeFieldLabel, children: t("route.name") }),
+                        jsx("input", {
+                          key: "name",
+                          type: "text",
+                          value: route.name,
+                          "aria-label": t("route.name"),
+                          style: Object.assign({}, searchInputStyle, { flex: "0 1 16em", minWidth: "10em" }),
+                          onChange: (event) => edit((base) => { base[index].name = String((event && event.target ? event.target.value : "") || "") })
+                        }),
+                        jsx("span", { key: "ls", style: routeFieldLabel, children: t("route.strategy") }),
+                        // children belongs INSIDE props. Passing it as the third argument
+                        // made it the element's key: the select rendered empty, kept its
+                        // value, and could not be changed at all - a control that looks
+                        // present and does nothing, which is the worst kind of control.
+                        jsx("select", {
+                          key: "strategy",
+                          value: route.strategy,
+                          "aria-label": t("route.strategy"),
+                          style: selectStyle,
+                          onChange: (event) => edit((base) => { base[index].strategy = String(event.target.value || "fallback") }),
+                          children: [
+                            jsx("option", { key: "f", value: "fallback", children: t("route.inOrder") }),
+                            jsx("option", { key: "r", value: "round-robin", children: t("route.roundRobin") })
+                          ]
+                        }),
+                        route.strategy === "round-robin"
+                          ? jsxs("span", { key: "sticky", style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+                              jsx("span", { key: "l", style: routeFieldLabel, children: t("route.stickyLimit") }),
+                              jsx("input", {
+                                key: "v",
+                                type: "number",
+                                min: 1,
+                                max: 20,
+                                value: route.stickyLimit,
+                                "aria-label": t("route.stickyLimit"),
+                                style: Object.assign({}, searchInputStyle, { width: "5em", flex: "0 0 auto" }),
+                                onChange: (event) => edit((base) => { base[index].stickyLimit = Number((event && event.target ? event.target.value : 1) || 1) })
+                              })
+                            ] })
+                          : null,
+                        jsxs("label", {
+                          key: "enabled",
+                          style: { display: "flex", alignItems: "center", gap: "5px", fontSize: "12px", opacity: 0.85 },
+                          children: [
+                            jsx("input", {
+                              key: "c",
+                              type: "checkbox",
+                              checked: route.enabled !== false,
+                              onChange: (event) => edit((base) => { base[index].enabled = (event && event.target ? event.target.checked : true) !== false })
+                            }),
+                            jsx("span", { key: "t", children: t("route.enabled") })
+                          ]
+                        })
+                      ].filter((child) => child !== null)
+                    }),
+                    jsxs("div", { key: "members", style: { marginTop: "8px" }, children: [
+                      jsx("div", { key: "h", style: routeFieldLabel, children: t("route.members") }),
+                      ...members.map((id, at) => jsxs("div", {
+                        key: "m" + at + id,
+                        style: { display: "flex", alignItems: "center", gap: "6px", padding: "3px 0" },
+                        children: [
+                          jsx("span", { key: "o", style: routeOrderStyle, children: String(at + 1).padStart(2, "0") }),
+                          // A member id, set in the editor's own face rather than the
+                          // roster's. Monospace is the model row's signature on this page -
+                          // a reader scanning for "which models are listed" must not have to
+                          // tell an editor line from a roster line by position alone.
+                          jsx("span", {
+                            key: "k",
+                            style: lost.includes(id)
+                              ? Object.assign({}, routeMemberStyle, { color: "rgba(200,120,40,0.95)" })
+                              : routeMemberStyle,
+                            children: id
+                          }),
+                          lost.includes(id) ? jsx("span", { key: "w", style: routeMissingStyle, children: t("route.memberMissing") }) : null,
+                          jsx("button", { key: "u", type: "button", style: smallButtonStyle, disabled: at === 0, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at - 1, 0, m) }), children: "\u2191" }),
+                          jsx("button", { key: "d", type: "button", style: smallButtonStyle, disabled: at === members.length - 1, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at + 1, 0, m) }), children: "\u2193" }),
+                          jsx("button", { key: "x", type: "button", style: smallButtonStyle, onClick: () => edit((base) => { base[index].members.splice(at, 1) }), children: t("route.memberRemove") })
+                        ].filter((child) => child !== null)
+                      })),
+                      jsxs("div", { key: "add", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" }, children: [
+                        jsx("input", {
+                          key: "box",
+                          type: "text",
+                          list: "model-rotator-roster-" + index,
+                          placeholder: t("route.memberPlaceholder"),
+                          "aria-label": t("route.memberPlaceholder"),
+                          style: searchInputStyle,
+                          onKeyDown: (event) => {
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            const box = event.currentTarget;
+                            if (box && box.value) { const value = box.value; edit((base) => { if (!base[index].members.includes(value)) base[index].members.push(value) }); box.value = "" }
+                          }
+                        }),
+                        jsx("datalist", { key: "dl", id: "model-rotator-roster-" + index, children: rosterKeys.map((key) => jsx("option", { key: key, value: key })) }),
+                        jsx("button", {
+                          key: "btn",
+                          type: "button",
+                          style: smallButtonStyle,
+                          children: t("route.memberAdd"),
+                          onClick: (event) => {
+                            const holder = event && event.currentTarget ? event.currentTarget.parentNode : null;
+                            const box = holder ? holder.querySelector("input") : null;
+                            if (box && box.value) { const value = box.value; edit((base) => { if (!base[index].members.includes(value)) base[index].members.push(value) }); box.value = "" }
+                          }
+                        })
+                      ] })
+                    ] })
+                  ]
+                })
+              : null;
+            return jsx("div", { key: "route" + index, style: { marginTop: "10px" }, children: [head, body].filter((child) => child !== null) });
+          });
+
+      return jsxs("div", {
+        key: "routes",
+        "data-route-editor": true,
+        style: routesStyle,
+        children: [
+          jsxs("div", { key: "head", style: listHeadStyle, children: [
+            jsx("div", { key: "t", style: listTitleStyle, children: t("route.title") }),
+            jsxs("div", { key: "acts", style: { display: "flex", gap: "8px", flex: "0 0 auto" }, children: [
+              jsx("button", { key: "add", type: "button", style: smallButtonStyle, disabled: busy, onClick: addRoute, children: t("route.new") }),
+              jsx("button", { key: "discard", type: "button", style: smallButtonStyle, disabled: busy || !dirty, onClick: () => { setDrafts(null); setNote("") }, children: t("route.discard") }),
+              jsx("button", { key: "save", type: "button", style: smallButtonStyle, disabled: busy || !dirty, onClick: save, children: busy ? t("route.saving") : t("route.save") })
+            ] })
+          ] }),
+          jsx("div", { key: "hint", style: routeHintStyle, children: t("route.hint") }),
+          note === "" ? null : jsx("div", { key: "note", style: { fontSize: "12px", opacity: 0.8, margin: "4px 0" }, children: note }),
+          ...routeNodes
+        ].filter((child) => child !== null)
+      });
+    }
+
+
     function ModelList(props) {
       const t = props.t;
       const [state, setState] = React.useState({ status: "loading", data: null, error: "" });
@@ -597,15 +981,23 @@ window.__ModuleLoader__.load({
        * same contract; only the key and the list it lands in differ.
        */
       const toggle = React.useCallback((row, enabled, scope) => {
-        // A channel row carries "provider" and its models; a model row carries "key".
+        // Three scopes, one route: a channel row carries "provider", a route row
+        // carries its own "name", a model row carries "key". The route is not a
+        // switch - it names WHICH order is in force - so it posts scope "route"
+        // with the name as the key, and an empty name clears the choice.
         const isChannel = scope === "provider";
-        const key = isChannel ? row.provider : row.key;
+        const isRoute = scope === "route";
+        // A route is set by naming it and cleared by sending no name at all, so
+        // the key follows the direction rather than the row: posting the name with
+        // enabled=false would look like "clear" in this page and like "set" in the
+        // file, and the button would never switch anything off.
+        const key = isChannel ? row.provider : isRoute ? (enabled ? row.name : "") : row.key;
         setBusy(key);
         setNote("");
         fetch(MODELS_PATH, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ key: key, enabled: enabled, scope: isChannel ? "provider" : "model" })
+          body: JSON.stringify({ key: key, enabled: enabled, scope: isRoute ? "route" : isChannel ? "provider" : "model" })
         })
           .then((response) => response.json().catch(() => null).then((payload) => ({ response, payload })))
           .then(({ response, payload }) => {
@@ -661,6 +1053,118 @@ window.__ModuleLoader__.load({
             ]
           })
         ]
+      }));
+      /**
+       * Every discovered pair key, for the editor's datalist and its lost-member check.
+       *
+       * Three shapes are accepted, in order, for the same reason the match counter
+       * accepts them: `models` is the newer flat roster, `channels` is the grouped one,
+       * and `groups` is the sectioned view the page renders. A host that publishes only
+       * one of them must not make the editor conclude that every member has left -
+       * which would paint a correct route entirely in warning colour.
+       */
+      const rosterKeys = () => {
+        const out = [];
+        const data = state.data;
+        if (data === null || data === undefined) return out;
+        const push = (rows) => {
+          for (const row of Array.isArray(rows) ? rows : []) {
+            const key = typeof row === "string" ? row : String((row && row.key) || "");
+            if (key !== "" && !out.includes(key)) out.push(key);
+          }
+        };
+        if (Array.isArray(data.models) && data.models.length > 0) push(data.models);
+        for (const channel of Array.isArray(data.channels) ? data.channels : []) push(channel.models);
+        for (const group of Array.isArray(data.groups) ? data.groups : []) {
+          for (const channel of Array.isArray(group.channels) ? group.channels : []) push(channel.models);
+        }
+        return out;
+      };
+
+      /**
+       * The routes the host reports, shaped for the editor.
+       *
+       * The host answers with resolved members - { key, usable } - because the read-only
+       * view wants to know which ones are candidates. The editor works on the ids
+       * themselves: order is its whole subject, and an object per member would make
+       * every reorder compare two structures instead of two strings. The usable flag is
+       * therefore dropped here and re-derived from the live roster, which is the same
+       * source it came from - and the one thing that is still true while a draft is
+       * being edited.
+       */
+      const routesOf = () => {
+        const data = state.data;
+        if (data === null || data === undefined) return [];
+        const rows = Array.isArray(data.routes) ? data.routes : [];
+        return rows.map((route) => ({
+          name: String(route.name || ""),
+          members: (Array.isArray(route.members) ? route.members : [])
+            .map((member) => (typeof member === "string" ? member : String((member && member.key) || "")))
+            .filter((id) => id !== ""),
+          strategy: route.strategy === "round-robin" ? "round-robin" : "fallback",
+          stickyLimit: Number(route.stickyLimit) > 0 ? Number(route.stickyLimit) : 1,
+          enabled: route.enabled !== false,
+          active: route.active === true,
+        }));
+      };
+
+      /**
+       * How many of a route's members are currently candidates.
+       *
+       * Counted from the roster rather than from the host's own counter, because the
+       * editor keeps drafts the host has never seen: a member typed a second ago is
+       * not in any payload yet, and reporting it as usable would be a guess.
+       */
+      const usableCountOf = (route) => {
+        const keys = rosterKeys();
+        const members = Array.isArray(route && route.members) ? route.members : [];
+        if (keys.length === 0) return members.length;
+        return members.filter((id) => keys.includes(id)).length;
+      };
+
+      /** POST the whole route table; resolves with the host's answer. */
+      const saveRoutes = (routes) => fetch(MODELS_PATH, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "routes", routes: routes }),
+      })
+        .then((response) => response.json().catch(() => null).then((payload) => ({ response, payload })))
+        .then(({ response, payload }) => {
+          if (payload && payload.list) setState({ status: "ready", data: payload.list, error: "" });
+          if (!response.ok) return { ok: false, error: (payload && payload.error) || ("HTTP " + response.status) };
+          return { ok: true, persisted: payload && payload.persisted };
+        });
+
+      /** POST which route is in force ("" clears the choice). */
+      const activateRoute = (name) => {
+        setBusy(name === "" ? "__none" : name);
+        return fetch(MODELS_PATH, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scope: "route", key: name }),
+        })
+          .then((response) => response.json().catch(() => null).then((payload) => ({ response, payload })))
+          .then(({ response, payload }) => {
+            if (payload && payload.list) setState({ status: "ready", data: payload.list, error: "" });
+            if (!response.ok) setNote((payload && payload.error) || ("HTTP " + response.status));
+          })
+          .catch((error) => setNote(String((error && error.message) || error)))
+          .then(() => setBusy(""));
+      };
+
+
+      // The routing editor, above the roster: a route decides the order the walk
+      // takes, so it belongs ahead of the list that shows what is available. Like the
+      // roster it sits outside the staged form (it writes config.json row by row), so
+      // a refresh there cannot discard a half-typed number above it.
+      children.push(jsx(RouteEditor, {
+        key: "__routes",
+        t: t,
+        rosterKeys: rosterKeys(),
+        routes: routesOf(),
+        usableCount: usableCountOf,
+        save: saveRoutes,
+        activate: activateRoute,
       }));
       // The box. Kept outside the settings form for the same reason the roster is:
       // it is a view control over a live roster, not a value the page stages and
@@ -1228,6 +1732,8 @@ window.__ModuleLoader__.load({
           P.settingsNumberField("quotaCooldownMs"),
           P.settingsNumberField("quotaCooldownHour"),
           P.settingsNumberField("statsPersistTtlMs"),
+          P.settingsNumberField("breakerFailures"),
+          P.settingsNumberField("breakerRestMs"),
           { field: "enabled", format: formatBoolean, parse: parseBoolean },
           { field: "confirmSwitch", format: formatBoolean, parse: parseBoolean },
           { field: "preferSameModel", format: formatBoolean, parse: parseBoolean },

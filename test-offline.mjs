@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { apply, classifyFailureKind, isHostRefusal, isNonChatModelId, parseReleaseTime, quotaRestUntil, switchNoticeFor } from './index.js'
+import { apply, breakerTripped, classifyFailureKind, isHostRefusal, isNonChatModelId, parseReleaseTime, quotaRestUntil, switchNoticeFor } from './index.js'
 
 // Keep the file layer out of these assertions: the config path is read inside
 // apply(), so pointing it at a path that does not exist pins the suite to the
@@ -598,6 +598,10 @@ const switchRun = async (behaviour, config, seams) => {
     ['insufficient user quota', 'quota'],
     ['provider "amd" model "MiMo-V2.6-Flash" does not support reasoning effort "high"', 'unsupported'],
     ['unsupported model: gpt-5-legacy', 'unsupported'],
+    // The gateway's own wording for an id with no backend. Observed live: it fell
+    // through to '' and a dead route collected 24 consecutive failures on it.
+    ['400: {"message":"Model id : deepseek-ai/DeepSeek-V4.1-Flash , has no provider supported","request_id":"7a4f866b"}', 'unsupported'],
+    ['no provider available for this model id', 'unsupported'],
     ['You exceeded your current quota, please check your plan and billing details', 'quota'],
     ['out of credits, please top up', 'quota'],
     ['账户余额不足，请充值后重试', 'quota'],
@@ -637,6 +641,33 @@ const switchRun = async (behaviour, config, seams) => {
   check('13h the release hour is configurable', quotaRestUntil(at(2026, 2, 10, 9, 0), { quotaCooldownMs: 0, quotaCooldownHour: 6 }) === at(2026, 2, 11, 6, 0), new Date(quotaRestUntil(at(2026, 2, 10, 9, 0), { quotaCooldownMs: 0, quotaCooldownHour: 6 })).toString())
   check('13i a month boundary rolls over', rest(at(2026, 1, 28, 9, 0)) === at(2026, 2, 1, 0, 0), new Date(rest(at(2026, 1, 28, 9, 0))).toString())
   check('13j switching the rest off restores the ordinary backoff', quotaRestUntil(at(2026, 2, 10, 9, 0), { quotaCooldownMs: 0, quotaCooldownHour: 0 }) === at(2026, 2, 11, 0, 0), new Date(quotaRestUntil(at(2026, 2, 10, 9, 0), { quotaCooldownMs: 0, quotaCooldownHour: 0 })).toString())
+
+  // A dead end rests for hours, not for one cooldown window. The backoff shape
+  // put a permanently dead route back in front of the reader every 30 minutes,
+  // and each return cost the turn its retries plus the backoff sleep.
+  {
+    const dead = '400: {"message":"Model id : dead/route , has no provider supported"}'
+    const h = makeCtx(() => [{ type: 'finish', reason: { kind: 'error', failure: { message: dead } } }])
+    apply(h.ctx, { retriesPerModel: 3, retryBackoffMs: 0, maxCandidates: 4 }, {})
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    check('13v a gateway dead end is not retried', h.attempted.filter(k => k === 'provA/alpha').length === 1, 'attempted=' + h.attempted.join(','))
+    const report = await h.registered.get('model_rotator_status').execute({}, {})
+    const row = report.split('\n').find(l => /^\s*provA\/alpha\s+\d/.test(l)) ?? ''
+    const minutes = Number(row.match(/\s(\d+)m\s/)?.[1] ?? 0)
+    check('13w an unsupported route rests for hours', minutes >= 360, 'row=' + row)
+    check('13x the rest names its reason', /unsupported/.test(row), 'row=' + row)
+  }
+
+  // A cooldown with no nameable cause still has to explain itself: '-' next to an
+  // active COOLDOWN read as "no reason on record".
+  {
+    const h = makeCtx(() => [{ type: 'finish', reason: { kind: 'error', failure: { message: 'something nobody has classified' } } }])
+    apply(h.ctx, { retriesPerModel: 0, retryBackoffMs: 0, maxCandidates: 2 }, {})
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const report = await h.registered.get('model_rotator_status').execute({}, {})
+    const row = report.split('\n').find(l => /^\s*provA\/alpha\s+\d/.test(l)) ?? ''
+    check('13y a resting row never prints an empty reason', /unclassified/.test(row), 'row=' + row)
+  }
 }
 
 {
@@ -1029,8 +1060,8 @@ const quietHandle = (value) => ({
   const { mkdtempSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'rotator-notice-'))
   process.env.DSH_MODEL_ROTOR_STATS = join(dir, 's.json')
-  const priorCfg = process.env.DSH_MODEL_ROTOR_CONFIG
-  process.env.DSH_MODEL_ROTOR_CONFIG = join(dir, 'absent.json')
+  const priorCfg = process.env.DSH_MODEL_ROTATOR_CONFIG
+  process.env.DSH_MODEL_ROTATOR_CONFIG = join(dir, 'absent.json')
   try {
     // Shape first: the message must be a user/message the session accepts.
     const same = switchNoticeFor({ provider: 'siliconflow', model: 'glm-5.3', displayName: '硅基流动' }, { provider: 'siliconflow', model: 'glm-5.2', displayName: '硅基流动' }, 'quota')
@@ -1126,8 +1157,8 @@ const quietHandle = (value) => ({
       /(quota)/.test(chainText) && !/\(network\)/.test(chainText),
       'notice=' + JSON.stringify(chainText) + ' attempted=' + chain.attempted.join(','))
   } finally {
-    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
-    else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg
+    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTATOR_CONFIG
+    else process.env.DSH_MODEL_ROTATOR_CONFIG = priorCfg
   }
 }
 
@@ -1139,8 +1170,8 @@ const quietHandle = (value) => ({
 {
   const { mkdtempSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'rotator-label-'))
-  const priorCfg = process.env.DSH_MODEL_ROTOR_CONFIG
-  process.env.DSH_MODEL_ROTOR_CONFIG = join(dir, 'config.json')
+  const priorCfg = process.env.DSH_MODEL_ROTATOR_CONFIG
+  process.env.DSH_MODEL_ROTATOR_CONFIG = join(dir, 'config.json')
   try {
     const h = makeCtx(() => [], undefined, { route: true })
     h.ctx.llm.listProviders = () => [
@@ -1163,8 +1194,8 @@ const quietHandle = (value) => ({
     const open = back.payload.list.channels.find(c => c.provider === 'provA')
     check('19e reopening clears the flag and restores the rows', back.status === 200 && open?.switchedOff === false && open.models.every(m => m.inRotation === true), JSON.stringify(open && { off: open.switchedOff, n: open.models.length }))
   } finally {
-    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
-    else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg
+    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTATOR_CONFIG
+    else process.env.DSH_MODEL_ROTATOR_CONFIG = priorCfg
   }
 }
 
@@ -1448,7 +1479,7 @@ const quietHandle = (value) => ({
     const cfgFile = join(sandbox, 'pin-config-' + (row === undefined ? 'none' : 'cool') + '.json')
     const { writeFileSync: wf } = await import('node:fs')
     wf(cfgFile, JSON.stringify({ pinned: 'provA/beta' }), 'utf8')
-    process.env.DSH_MODEL_ROTOR_CONFIG = cfgFile
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgFile
     // alpha always fails with no content, so the walk continues past it.
     const h = makeCtx(() => ([{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }]))
     apply(h.ctx, { confirmSwitch: false }, {})
@@ -1503,6 +1534,23 @@ const quietHandle = (value) => ({
   }
 }
 
+// ---- the pin fixture must not leak its config into the rest of the suite ------
+// This block used to leave DSH_MODEL_ROTATOR_CONFIG pointing at
+// pin-config-cool.json for every later scenario. The damage was silent and
+// specific: that file pins a model for a *different* fixture, so scenario 21's
+// control run inherited a pin from a test that had already finished - and the
+// guard's own control ('with the guard off the small route is dialed') started
+// failing for a reason that had nothing to do with the guard. Environment state
+// set by one scenario is process-global by definition, so it is restored here
+// instead of being trusted to be harmless.
+{
+  const { existsSync } = await import('node:fs')
+  process.env.DSH_MODEL_ROTATOR_CONFIG = join(tmpdir(), 'rotator-offline-no-config-here', 'absent.json')
+  check('the pin fixtures leave no config behind for later scenarios',
+    existsSync(process.env.DSH_MODEL_ROTATOR_CONFIG) === false,
+    String(process.env.DSH_MODEL_ROTATOR_CONFIG))
+}
+
 // ---- a failing channel does not strand healthy siblings of the same model ----
 {
   // The real report: WorkBuddy hit its quota wall while buddy and trae - the same
@@ -1544,8 +1592,8 @@ const quietHandle = (value) => ({
   const { mkdtempSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'rotator-switchlog-'))
   process.env.DSH_MODEL_ROTOR_STATS = join(dir, 's.json')
-  const priorCfg = process.env.DSH_MODEL_ROTOR_CONFIG
-  process.env.DSH_MODEL_ROTOR_CONFIG = join(dir, 'absent.json')
+  const priorCfg = process.env.DSH_MODEL_ROTATOR_CONFIG
+  process.env.DSH_MODEL_ROTATOR_CONFIG = join(dir, 'absent.json')
   try {
     const quotaThenOk = options => (options.model === 'alpha'
       ? [{ type: 'finish', reason: { kind: 'error', failure: { message: '429: {"message":"insufficient balance"}' } } }]
@@ -1646,8 +1694,8 @@ const quietHandle = (value) => ({
       steered2.length === 1 && steered2[0].source.form === 'notice',
       'steered=' + steered2.length)
   } finally {
-    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTOR_CONFIG
-    else process.env.DSH_MODEL_ROTOR_CONFIG = priorCfg
+    if (priorCfg === undefined) delete process.env.DSH_MODEL_ROTATOR_CONFIG
+    else process.env.DSH_MODEL_ROTATOR_CONFIG = priorCfg
   }
 }
 
@@ -1740,8 +1788,310 @@ const quietHandle = (value) => ({
     report.split('\n').filter(line => /window guard/.test(line)).join(' | ').slice(0, 240))
 }
 
+// ---- 24. bounded status output ------------------------------------------------
+// The ranking is one row per discovered route, and on a machine with several hundred
+// pairs that single table dominated the tool result. Both controls are asserted here
+// because a bound that silently drops rows is worse than no bound: the caller reads a
+// clipped list as the whole list and concludes the model it wants is missing.
+{
+  const h = makeCtx(() => [{ text: 'ok' }])
+  apply(h.ctx, {}, {})
+  const st = h.registered.get('model_rotator_status')
+  const full = await st.execute({}, {})
+  check('24a the default reports every row, clipped by nothing',
+    !/withheld/.test(full), full.split('\n').filter(l => /withheld/.test(l)).join(' | '))
+
+  const cut = await st.execute({ maxRows: 1 }, {})
+  check('24b maxRows truncates and states what it withheld',
+    /withheld/.test(cut) && /maxRows/.test(cut),
+    cut.split('\n').filter(l => /withheld/.test(l)).join(' | '))
+  check('24c a truncated report is shorter than the full one',
+    cut.split('\n').length < full.split('\n').length, 'full=' + full.split('\n').length + ' cut=' + cut.split('\n').length)
+
+  const zero = await st.execute({ maxRows: 0 }, {})
+  check('24d maxRows 0 means every row, not none',
+    !/withheld/.test(zero) && zero.length === full.length, 'len ' + zero.length + ' vs ' + full.length)
+
+  const summary = await st.execute({ summary: true }, {})
+  check('24e summary mode still answers the state question',
+    /enabled/.test(summary) && /maxCandidates/.test(summary), '')
+
+  const props = Object.keys(st.parameters?.properties ?? {})
+  check('24f the status tool declares both controls',
+    props.includes('maxRows') && props.includes('summary'), props.join(','))
+}
+
+// ---- 25. declared routes, the breaker, and the two classification gaps --------
+// Three separate pieces, each answering a failure mode measured on this install:
+//
+//   25a-d the routing page dsh-xdpool ships (fallback vs round-robin, stickyLimit,
+//         a cursor that only advances on a real walk, and a route that resolves
+//         against the live roster instead of dispatching a hand-typed typo);
+//   25e-g the breaker: a run of failures we cannot classify still earns an hours-
+//         long rest, which is what the capped half-hour backoff could not do;
+//   25h-j the two classification gaps read out of stats.json, and the empty failure
+//         message that used to be recorded as nothing at all.
+{
+  // Routes and the active choice are FILE-layer keys (they are hand-edited lists of
+  // arbitrary length, like the exclusion lists), so a harness proves them the way a
+  // user sets them: a config.json under DSH_MODEL_ROTATOR_CONFIG. Passing them as the
+  // apply() config would make the page layer own them, which it must not.
+  const routesPair = async (fileConfig, behaviour) => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'rotator-routes-'))
+    const cfgPath = join(dir, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify(fileConfig), 'utf8')
+    // Every member but the last fails, so one run reveals the whole order: a walk
+    // that stops at the first success would only ever show its head.
+    const fallbackBehaviour = (options, n) => (n <= 2
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited' } } }]
+      : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+    const h = makeCtx(behaviour ?? fallbackBehaviour)
+    // The path stays in the environment for as long as this harness is used, NOT
+    // only for the apply() call: the plugin resolves config.json lazily, on the
+    // first turn that needs it. Restoring it right after apply() re-pointed the
+    // harness at the suite's absent file, so every route below silently read an
+    // empty config - the test looked like "the route feature does nothing".
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
+    // The page layer still supplies the policy knobs these assertions are not about:
+    // with the shipped retriesPerModel (2) the walk legitimately dispatches the head
+    // twice before moving on, and every "what did it try next" assertion below would
+    // be reading a retry instead of a route member.
+    apply(h.ctx, { retriesPerModel: 0, confirmSwitch: false, maxCandidates: 6 }, {})
+    return h
+  }
+
+  // 25a: an ordered route heads the walk, right after the model the turn started on.
+  const ordered = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
+    activeRoute: 'write',
+  })
+  await collect(ordered.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('25a a declared route is tried before the measured ranking',
+    ordered.attempted[0] === 'provA/alpha' && ordered.attempted[1] === 'provB/gamma' && ordered.attempted[2] === 'provA/beta',
+    'attempted=' + ordered.attempted.join(','))
+
+  // 25b: fallback restarts at the head every turn - that is what makes it predictable.
+  const twice = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
+    activeRoute: 'write',
+  })
+  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const firstTurn = twice.attempted.slice()
+  twice.attempted.length = 0
+  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('25b fallback restarts from the head on the next turn',
+    JSON.stringify(firstTurn) === JSON.stringify(twice.attempted),
+    'turn1=' + firstTurn.join(',') + ' turn2=' + twice.attempted.join(','))
+
+  const rrConfig = {
+    routes: [{ name: 'spread', strategy: 'round-robin', stickyLimit: 1, members: ['provA/beta', 'provB/gamma'] }],
+    activeRoute: 'spread',
+  }
+  const rr = await routesPair(rrConfig)
+  await collect(rr.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const rrFirst = rr.attempted[1]
+  rr.attempted.length = 0
+  await collect(rr.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const rrSecond = rr.attempted[1]
+  check('25c round-robin advances the cursor between turns',
+    rrFirst !== rrSecond && rrFirst !== undefined && rrSecond !== undefined,
+    'first=' + rrFirst + ' second=' + rrSecond)
+
+  // 25c2: stickyLimit keeps one member for that many turns before moving on.
+  const sticky = await routesPair({
+    routes: [{ name: 'spread', strategy: 'round-robin', stickyLimit: 2, members: ['provA/beta', 'provB/gamma'] }],
+    activeRoute: 'spread',
+  })
+  const stickyHeads = []
+  for (let turn = 0; turn < 3; turn += 1) {
+    sticky.attempted.length = 0
+    await collect(sticky.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    stickyHeads.push(sticky.attempted[1])
+  }
+  check('25c2 stickyLimit keeps a member for that many turns',
+    stickyHeads[0] === stickyHeads[1] && stickyHeads[1] !== stickyHeads[2],
+    'heads=' + stickyHeads.join(','))
+
+  // 25d: an unresolvable or switched-off route name is ignored, and the ranking decides.
+  const unknownRoute = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma'] }],
+    activeRoute: 'typo',
+  })
+  await collect(unknownRoute.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const unknownReport = await unknownRoute.registered.get('model_rotator_status').execute({}, {})
+  check('25d an undeclared active route is reported as ignored',
+    /active route\s*: typo \(not declared - ignored\)/.test(unknownReport),
+    unknownReport.split('\n').filter(line => /active route/.test(line)).join(' | '))
+
+  // 25d2: a member the roster does not list is not dispatched, and the report says so.
+  const ghost = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma', 'provZ/nope'] }],
+    activeRoute: 'write',
+  })
+  await collect(ghost.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('25d2 a route member the roster does not list is not dispatched',
+    !ghost.attempted.includes('provZ/nope'), 'attempted=' + ghost.attempted.join(','))
+  const ghostReport = await ghost.registered.get('model_rotator_status').execute({}, {})
+  check('25d3 the report names the member that was not dispatched',
+    /not dispatched: provZ\/nope/.test(ghostReport),
+    ghostReport.split('\n').filter(line => /active route/.test(line)).join(' | '))
+
+  // 25e: the breaker is a counter rule, so it fires on names we cannot classify.
+  const unclassified = Array.from({ length: 5 }, () => ({
+    type: 'finish', reason: { kind: 'error', failure: { message: 'upstream said no' } },
+  }))
+  const breakerH = makeCtx(() => unclassified)
+  apply(breakerH.ctx, { retriesPerModel: 0, maxCandidates: 2, confirmSwitch: false, breakerFailures: 2, breakerRestMs: 6 * 60 * 60 * 1000 }, {})
+  await collect(breakerH.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const breakerReport = await breakerH.registered.get('model_rotator_status').execute({}, {})
+  check('25e the breaker is reported with its threshold and its rest',
+    /breaker\s*: after 2 consecutive failures/.test(breakerReport) && /360min/.test(breakerReport),
+    breakerReport.split('\n').filter(line => /breaker/.test(line)).join(' | '))
+
+  check('25f a run below the threshold is not a breaker',
+    breakerTripped({ consecutiveFailures: 1 }, { breakerFailures: 2 }) === false)
+  check('25g a run at the threshold trips it',
+    breakerTripped({ consecutiveFailures: 2 }, { breakerFailures: 2 }) === true)
+
+  // 25h: the four sentences that sat unclassified in this install's stats.json.
+  const newlyClassified = [
+    ['Upstream request failed: Model is unavailable.', 'unsupported'],
+    ['codearts: The request param is invalid, Please check it', 'unsupported'],
+    ['workbuddy: 请求参数错误，请检查后重试 request illegal', 'unsupported'],
+    ['未配置凭据，请先登录', 'auth'],
+  ]
+  for (const [message, expected] of newlyClassified) {
+    check('25h "' + message.slice(0, 32) + '" reads as ' + expected,
+      classifyFailureKind(message) === expected, classifyFailureKind(message))
+  }
+
+  // 25h2: a *block* is not a dead route. WorkBuddy answers "请求被拦截，请重新发送
+  // request illegal" - a refusal with a resend instruction. Treating it as the
+  // unsupported dead end would retire a channel that a resend may well reach for six
+  // hours, and the row that taught this was read out of the live stats file.
+  check('25h2 a blocked request with a resend hint is not a dead route',
+    classifyFailureKind('workbuddy: 请求被拦截，请重新发送 request illegal') === '',
+    classifyFailureKind('workbuddy: 请求被拦截，请重新发送 request illegal'))
+
+  // 25i: an empty failure message falls back to the finish kind instead of "".
+  const emptyMessage = makeCtx(() => [{ type: 'finish', reason: { kind: 'error', failure: { message: '' } } }])
+  apply(emptyMessage.ctx, { retriesPerModel: 0, maxCandidates: 1, confirmSwitch: false }, {})
+  await collect(emptyMessage.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const emptyReport = await emptyMessage.registered.get('model_rotator_status').execute({}, {})
+  check('25i an empty failure message is recorded as the finish kind, not as nothing',
+    /last failure seen: provA\/alpha \[unsupported\]|last failure seen: provA\/alpha \[.\]/.test(emptyReport) || !/last failure seen: \(nothing recorded yet\)/.test(emptyReport),
+    emptyReport.split('\n').filter(line => /last failure seen/.test(line)).join(' | '))
+
+  // 25k: the whole route table can be written from the page, and a route that
+  // disappears takes its active flag with it. Leaving the name behind would make
+  // every later report read "(not declared - ignored)" - a state the reader never
+  // asked for and cannot explain from the page they just used.
+  {
+    const { mkdtempSync, readFileSync } = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'rotator-routes-write-'))
+    const cfgPath = join(dir, 'config.json')
+    const prior = process.env.DSH_MODEL_ROTATOR_CONFIG
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
+    try {
+      const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }], undefined, { route: true })
+      apply(h.ctx, {}, {})
+      const saved = await h.request('POST', {
+        scope: 'routes',
+        routes: [
+          { name: 'a', members: ['provB/gamma', 'provA/beta'], strategy: 'round-robin', stickyLimit: 3 },
+          { name: 'b', members: ['provA/alpha'] },
+        ],
+      })
+      check('25k the whole route table is written in one request',
+        saved.status === 200
+          && Array.isArray(saved.payload.routes) && saved.payload.routes.length === 2
+          && saved.payload.routes[0].strategy === 'round-robin' && saved.payload.routes[0].stickyLimit === 3,
+        JSON.stringify(saved.payload && saved.payload.routes))
+
+      const onDisk = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      check('25k2 the routes reach config.json', Array.isArray(onDisk.routes) && onDisk.routes.length === 2, JSON.stringify(onDisk.routes && onDisk.routes.map((r) => r.name)))
+
+      // An unknown strategy and a nameless route are normalised away, not stored.
+      await h.request('POST', { scope: 'routes', routes: [{ name: 'c', members: ['provA/alpha'], strategy: 'weird' }, { name: '', members: ['provA/beta'] }] })
+      const normalized = JSON.parse(readFileSync(cfgPath, 'utf8')).routes
+      check('25k3 an unknown strategy falls back and a nameless route is dropped',
+        normalized.length === 1 && normalized[0].strategy === 'fallback', JSON.stringify(normalized))
+
+      // Activating a route, then deleting it, clears the active name in the same write.
+      await h.request('POST', { scope: 'routes', routes: [{ name: 'keep', members: ['provA/alpha'] }] })
+      await h.request('POST', { scope: 'route', key: 'keep' })
+      const activated = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      check('25k4 a route can be made the one in force', activated.activeRoute === 'keep', String(activated.activeRoute))
+      await h.request('POST', { scope: 'routes', routes: [{ name: 'other', members: ['provA/beta'] }] })
+      const cleared = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      check('25k5 deleting the active route clears the active name in the same write',
+        cleared.activeRoute === '', JSON.stringify({ active: cleared.activeRoute, routes: cleared.routes.map((r) => r.name) }))
+
+      // An empty submission is refused rather than written: "you deleted them all"
+      // is a different statement from "the editor sent nothing".
+      const emptyPost = await h.request('POST', { scope: 'routes', routes: [] })
+      check('25k6 an empty table is accepted only as a real delete', emptyPost.status === 200 && JSON.parse(readFileSync(cfgPath, 'utf8')).routes.length === 0, String(emptyPost.status))
+      const junk = await h.request('POST', { scope: 'routes', routes: [{ name: '', members: [] }] })
+      check('25k7 a table of unusable routes is refused, not written', junk.status === 400, junk.status + ' ' + JSON.stringify(junk.payload))
+    } finally {
+      if (prior === undefined) delete process.env.DSH_MODEL_ROTATOR_CONFIG
+      else process.env.DSH_MODEL_ROTATOR_CONFIG = prior
+    }
+  }
+
+  // 25l: a config write must not throw away the discovered roster.
+  //
+  // It did, and the cost was invisible in a test and obvious in the browser: every
+  // POST rebuilt the pair list with one listProviders() + listModels() sweep over
+  // hundreds of pairs before answering, so the save button sat on its busy label for
+  // seconds. A GET that hit the cache took 15ms; a POST took 6.3s, and 16.2s when a
+  // second write followed. The roster is not derived from the config - no config key
+  // adds or removes a provider/model pair - so it is not a stale derivation.
+  {
+    const { mkdtempSync } = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'rotator-cache-'))
+    const cfgPath = join(dir, 'config.json')
+    const prior = process.env.DSH_MODEL_ROTATOR_CONFIG
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
+    try {
+      let listCalls = 0
+      const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }], undefined, { route: true })
+      const realRegistration = h.ctx.llm.registration
+      h.ctx.llm.registration = (provider) => {
+        const entry = realRegistration(provider)
+        return {
+          ...entry,
+          adapter: {
+            listModels: async (p) => { listCalls += 1; return entry.adapter.listModels(p) },
+          },
+        }
+      }
+      apply(h.ctx, {}, {})
+      await h.request('GET')
+      const afterRead = listCalls
+      await h.request('POST', { scope: 'route', key: '' })
+      await h.request('POST', { scope: 'route', key: '' })
+      check('25l a config write does not re-sweep the roster',
+        listCalls === afterRead,
+        'listModels calls: after read=' + afterRead + ' after two writes=' + listCalls)
+    } finally {
+      if (prior === undefined) delete process.env.DSH_MODEL_ROTATOR_CONFIG
+      else process.env.DSH_MODEL_ROTATOR_CONFIG = prior
+    }
+  }
+
+  // 25j: the two new settings are live page fields, not file-only keys. Read from
+  // the report's own field count, so a schema that failed to load reads as such
+  // instead of as "the field is missing".
+  const fieldReport = await breakerH.registered.get('model_rotator_status').execute({ summary: true }, {})
+  const fieldLine = fieldReport.split('\n').filter(line => /settings page/.test(line)).join(' | ')
+  const fieldCount = Number((fieldLine.match(/live, (\d+) fields/) ?? [])[1] ?? -1)
+  check('25j the two breaker fields are declared on the settings page',
+    fieldCount >= 18, fieldLine)
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))
 process.exit(failed.length === 0 ? 0 : 1)
-
