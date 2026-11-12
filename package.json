@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-rotator",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Model auto-ranking and transparent failover for DeepSeek Harness: ranks discovered models by measured connectivity and speed, prefers the same model on another channel before switching models, honours a declared route chain (fallback or round-robin), rests a route that keeps failing behind a breaker, and switches to the next candidate inside the same turn when the current one is unusable. Never modifies model or provider configuration.",
   "type": "module",
   "main": "index.js",

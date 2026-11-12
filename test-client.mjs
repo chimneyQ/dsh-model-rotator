@@ -586,6 +586,68 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   // Both routes fold to a chevron; "写稿" is the one this block expanded. The name is
   // unchanged after a save (the draft only carried the strategy), so matching on it is
   // the precise handle.
+  // ---- multi-select member adding ----------------------------------------
+  // The single box takes one exact id. Building a chain is usually "these three",
+  // and a picker that only adds one per click is a picker nobody uses.
+  {
+    // Re-open the editor if the save above left it closed.
+    let cur = nodes
+    if (!cur.some((n) => n.type === "select")) {
+      const fold = btns(cur).find((n) => /写稿\s*$/.test(textOf(n)))
+      if (fold !== undefined) { click(fold); cur = await settle() }
+    }
+    const toggle = btns(cur).find((n) => /^多选添加$/.test(textOf(n).trim()))
+    check('5y the member picker opens from the editor', toggle !== undefined, btns(cur).map((n) => textOf(n).trim()).slice(0, 12).join(' | '))
+    if (toggle !== undefined) {
+      click(toggle)
+      cur = await settle()
+      const boxes = cur.filter((n) => n.type === "input" && n.props && typeof n.props["data-route-pick"] === "string")
+      check('5y2 the picker lists the roster minus the members already in the route',
+        boxes.length > 0 && !boxes.some((n) => n.props["data-route-pick"] === "provA/beta"),
+        'boxes=' + boxes.length + ' keys=' + boxes.map((n) => n.props["data-route-pick"]).join(','))
+
+      // Filter narrows the list without clearing what is already ticked.
+      if (boxes.length >= 2) {
+        boxes[0].props.onChange({ target: { checked: true } })
+        cur = await settle()
+        const filterBox = cur.find((n) => n.type === "input" && /筛选模型/.test(String(n.props && n.props.placeholder)))
+        if (filterBox !== undefined) {
+          // provC, not provB: provB/gamma is already a member of this route, and the
+          // picker only lists what is not. Filtering to an already-added channel would
+          // prove the empty state, not the filter.
+          filterBox.props.onChange({ target: { value: "provC" } })
+          cur = await settle()
+        }
+        const narrowed = cur.filter((n) => n.type === "input" && n.props && typeof n.props["data-route-pick"] === "string")
+        check('5y3 the filter narrows the list and keeps the ticks',
+          narrowed.length > 0 && narrowed.every((n) => /provC/.test(n.props["data-route-pick"])) && /已选 1 个/.test(cur.map(textOf).join('')),
+          'shown=' + narrowed.map((n) => n.props["data-route-pick"]).join(',') + ' note=' + (cur.map(textOf).find((x) => /已选/.test(x)) || '').slice(0, 30))
+
+        const addBtn = btns(cur).find((n) => /^加入所选/.test(textOf(n).trim()))
+        check('5y4 the add button states how many are ticked', addBtn !== undefined && /（1）/.test(textOf(addBtn)), addBtn === undefined ? 'no button' : textOf(addBtn))
+        if (addBtn !== undefined) {
+          const countOf = (list) => {
+            const hit = list.map(textOf).find((x) => /个成员/.test(x)) || ''
+            const m = hit.match(/(\d+) 个成员/)
+            return m === null ? -1 : Number(m[1])
+          }
+          const membersOf = (list) => list
+            .filter((n) => n.props && typeof n.props["data-route-member"] === "string")
+            .map((n) => n.props["data-route-member"])
+          const before = membersOf(cur)
+          const ticked = boxes.filter((n) => n.props["data-route-pick"]).map((n) => n.props["data-route-pick"])
+          click(addBtn)
+          cur = await settle()
+          const after = membersOf(cur)
+          check('5y5 adding appends the ticked models in one action',
+            after.length === before.length + 1 && after.some((k) => !before.includes(k)),
+            before.join(',') + ' -> ' + after.join(',') + ' | ticked=' + ticked.join(','))
+          check('5y6 the picker closes after adding', !cur.some((n) => n.type === "input" && n.props && typeof n.props["data-route-pick"] === "string"), '')
+        }
+      }
+    }
+  }
+
   // The fold state is the editor's, and a save does not force it closed: whichever
   // state the reader left it in is the state they see. So only click when it is
   // actually open - clicking a closed fold would open it and prove the opposite.

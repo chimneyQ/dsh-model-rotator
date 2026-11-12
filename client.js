@@ -140,6 +140,15 @@ window.__ModuleLoader__.load({
       "route.memberRemove": "移除",
       "route.memberMissing": "不在候选里",
       "route.memberPlaceholder": "输入或从列表选择 provider/model，回车加入",
+      "route.multiOpen": "多选添加",
+      "route.multiClose": "收起多选",
+      "route.pickFilter": "筛选模型…（按 provider/model 子串）",
+      "route.pickHint": "只列出还没加入的（已加入 {n} 个）",
+      "route.pickSelected": "已选 {n} 个",
+      "route.pickAdd": "加入所选（{n}）",
+      "route.pickCancel": "取消",
+      "route.pickNone": "没有可加入的模型",
+      "route.pickTruncated": "仅显示前 {n} 个，用筛选缩小范围",
       "route.empty": "还没有路由。新建一条，把几个模型按你要的顺序串起来。",
       "models.writeFailed": "写入 config.json 失败，改动未保存。",
       "switches.tab": "模型切换",
@@ -292,6 +301,15 @@ window.__ModuleLoader__.load({
       "route.memberRemove": "Remove",
       "route.memberMissing": "not a candidate",
       "route.memberPlaceholder": "Type or pick a provider/model, Enter to add",
+      "route.multiOpen": "Pick several",
+      "route.multiClose": "Hide picker",
+      "route.pickFilter": "Filter models… (provider/model substring)",
+      "route.pickHint": "Only models not already in this route ({n} in it)",
+      "route.pickSelected": "{n} selected",
+      "route.pickAdd": "Add selected ({n})",
+      "route.pickCancel": "Cancel",
+      "route.pickNone": "Nothing left to add",
+      "route.pickTruncated": "Showing the first {n}; narrow the filter to see more",
       "route.empty": "No route yet. Create one to string several models together in your own order.",
       "models.writeFailed": "Writing config.json failed; the change was not saved.",
       "switches.tab": "Model switches",
@@ -466,6 +484,10 @@ window.__ModuleLoader__.load({
     const routeMemberStyle = { fontSize: "12px", wordBreak: "break-all" };
     // Likewise not monospace: the order index is a counter, not an id.
     const routeOrderStyle = { fontSize: "11px", opacity: 0.55, flex: "0 0 2em", textAlign: "right" };
+    /** The multi-select panel: a boxed region under the member list. */
+    const pickerStyle = { marginTop: "8px", padding: "8px", border: "1px solid rgba(128,128,128,0.25)", borderRadius: "4px" };
+    const pickerListStyle = { maxHeight: "220px", overflowY: "auto", marginTop: "4px" };
+    const pickerRowStyle = { display: "flex", alignItems: "center", gap: "6px", padding: "2px 0", fontSize: "12px" };
     /** A native select, styled to match the search box. */
     const selectStyle = { padding: "4px 6px", fontSize: "12px", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", background: "transparent", color: "inherit" };
     const smallButtonStyle = { background: "transparent", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", color: "inherit", cursor: "pointer", fontSize: "11px", padding: "2px 8px", flex: "0 0 auto" };
@@ -529,6 +551,12 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [note, setNote] = React.useState("");
       const [openAt, setOpenAt] = React.useState(-1);
+      // Multi-select picker: which route's picker is open, what is ticked, and the
+      // filter. Three pieces of local state rather than one object, because a
+      // checkbox toggle must not also reset the filter the reader just typed.
+      const [pickerAt, setPickerAt] = React.useState(-1);
+      const [picked, setPicked] = React.useState([]);
+      const [pickFilter, setPickFilter] = React.useState("");
 
       const rows = drafts === null ? saved : drafts;
       const dirty = drafts !== null;
@@ -718,6 +746,7 @@ window.__ModuleLoader__.load({
                           // tell an editor line from a roster line by position alone.
                           jsx("span", {
                             key: "k",
+                            "data-route-member": id,
                             style: lost.includes(id)
                               ? Object.assign({}, routeMemberStyle, { color: "rgba(200,120,40,0.95)" })
                               : routeMemberStyle,
@@ -729,6 +758,111 @@ window.__ModuleLoader__.load({
                           jsx("button", { key: "x", type: "button", style: smallButtonStyle, onClick: () => edit((base) => { base[index].members.splice(at, 1) }), children: t("route.memberRemove") })
                         ].filter((child) => child !== null)
                       })),
+                      // Two ways in, on purpose. The single box takes an exact id -
+                      // including one the roster has never heard of, which is how a
+                      // model that is not published yet gets a place in the order. The
+                      // multi-select below takes several from the roster at once, which
+                      // is what building a three-or-four member chain actually looks
+                      // like: ticking beats typing an id you have to spell exactly.
+                      jsxs("div", { key: "multi", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" }, children: [
+                        jsx("button", {
+                          key: "toggle",
+                          type: "button",
+                          style: smallButtonStyle,
+                          "data-route-picker-toggle": true,
+                          onClick: () => {
+                            if (pickerAt === index) { setPickerAt(-1); setPicked([]); setPickFilter(""); return }
+                            setPickerAt(index)
+                            setPicked([])
+                            setPickFilter("")
+                          },
+                          children: pickerAt === index ? t("route.multiClose") : t("route.multiOpen")
+                        }),
+                        pickerAt === index
+                          ? jsx("span", { key: "sel", style: routeMetaStyle, children: fill(t("route.pickSelected"), { n: picked.length }) })
+                          : null
+                      ].filter((child) => child !== null) }),
+                      pickerAt === index
+                        ? (() => {
+                            // Only what is not already a member, filtered by the box.
+                            // The list is capped: a 500-pair roster rendered in full is a
+                            // scrollbar nobody can aim at, and the filter is right there.
+                            const already = members
+                            const q = pickFilter.trim().toLowerCase()
+                            const available = rosterKeys.filter((key) => !already.includes(key) && (q === "" || key.toLowerCase().includes(q)))
+                            const shown = available.slice(0, 200)
+                            return jsxs("div", {
+                              key: "picker",
+                              "data-route-picker": true,
+                              style: pickerStyle,
+                              children: [
+                                jsx("input", {
+                                  key: "filter",
+                                  type: "text",
+                                  value: pickFilter,
+                                  placeholder: t("route.pickFilter"),
+                                  "aria-label": t("route.pickFilter"),
+                                  style: Object.assign({}, searchInputStyle, { marginBottom: "6px" }),
+                                  onChange: (event) => setPickFilter(String((event && event.target ? event.target.value : "") || ""))
+                                }),
+                                jsx("div", { key: "hint", style: routeMetaStyle, children: fill(t("route.pickHint"), { n: already.length }) }),
+                                jsx("div", {
+                                  key: "list",
+                                  style: pickerListStyle,
+                                  children: shown.length === 0
+                                    ? jsx("div", { key: "none", style: routeMetaStyle, children: t("route.pickNone") })
+                                    : shown.map((key) => jsxs("label", {
+                                        key: key,
+                                        style: pickerRowStyle,
+                                        children: [
+                                          jsx("input", {
+                                            key: "c",
+                                            type: "checkbox",
+                                            checked: picked.includes(key),
+                                            "data-route-pick": key,
+                                            onChange: () => setPicked((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key])),
+                                          }),
+                                          jsx("span", { key: "k", style: routeMemberStyle, children: key }),
+                                        ]
+                                      }))
+                                }),
+                                available.length > shown.length
+                                  ? jsx("div", { key: "trunc", style: routeMetaStyle, children: fill(t("route.pickTruncated"), { n: shown.length }) })
+                                  : null,
+                                jsxs("div", { key: "acts", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" }, children: [
+                                  jsx("button", {
+                                    key: "add",
+                                    type: "button",
+                                    style: smallButtonStyle,
+                                    "data-route-pick-add": true,
+                                    disabled: picked.length === 0,
+                                    onClick: () => {
+                                      // Appended in the order the roster lists them, not in
+                                      // the order they were ticked: two people building the
+                                      // same chain from the same roster should end up with the
+                                      // same order, and a tick order is invisible in the result.
+                                      const chosen = rosterKeys.filter((key) => picked.includes(key))
+                                      edit((base) => {
+                                        for (const key of chosen) if (!base[index].members.includes(key)) base[index].members.push(key)
+                                      })
+                                      setPicked([])
+                                      setPickerAt(-1)
+                                      setPickFilter("")
+                                    },
+                                    children: fill(t("route.pickAdd"), { n: picked.length })
+                                  }),
+                                  jsx("button", {
+                                    key: "cancel",
+                                    type: "button",
+                                    style: smallButtonStyle,
+                                    onClick: () => { setPicked([]); setPickerAt(-1); setPickFilter("") },
+                                    children: t("route.pickCancel")
+                                  })
+                                ] })
+                              ].filter((child) => child !== null)
+                            })
+                          })()
+                        : null,
                       jsxs("div", { key: "add", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" }, children: [
                         jsx("input", {
                           key: "box",
