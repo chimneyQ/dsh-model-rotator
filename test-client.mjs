@@ -315,41 +315,42 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
 // This drives the component against a small payload with real state, real effects
 // and real re-renders, and presses the buttons a reader would press.
 {
-  const store = []
+  const store = new Map()
+  let path = ''
   let cursor = 0
   let effects = []
   let dirty = false
+  const enter = (id) => { const prev = [path, cursor]; path = path + '/' + id; cursor = 0; return prev }
+  const exit = (prev) => { path = prev[0]; cursor = prev[1] }
+  const slot = () => { const i = cursor++; const k = path + '#' + i; return [k, store.get(k)] }
   const runtime = {
     useState(initial) {
-      const i = cursor++
-      if (store[i] === undefined) store[i] = typeof initial === 'function' ? initial() : initial
-      return [store[i], (next) => {
-        const value = typeof next === 'function' ? next(store[i]) : next
-        if (Object.is(value, store[i])) return
-        store[i] = value
+      const [k, had] = slot()
+      if (had === undefined) store.set(k, typeof initial === 'function' ? initial() : initial)
+      return [store.get(k), (next) => {
+        const value = typeof next === 'function' ? next(store.get(k)) : next
+        if (Object.is(value, store.get(k))) return
+        store.set(k, value)
         dirty = true
       }]
     },
     useCallback(fn, deps) {
-      const i = cursor++
-      const prev = store[i]
-      if (prev !== undefined && deps !== undefined && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]))) return prev.fn
-      store[i] = { fn, deps }
+      const [k, prev] = slot()
+      if (prev !== undefined && deps !== undefined && deps.length === prev.deps.length && deps.every((d, k2) => Object.is(d, prev.deps[k2]))) return prev.fn
+      store.set(k, { fn, deps })
       return fn
     },
     useMemo(fn, deps) {
-      const i = cursor++
-      const prev = store[i]
-      if (prev !== undefined && deps !== undefined && Array.isArray(prev.deps) && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]))) return prev.value
+      const [k, prev] = slot()
+      if (prev !== undefined && deps !== undefined && Array.isArray(prev.deps) && deps.length === prev.deps.length && deps.every((d, k2) => Object.is(d, prev.deps[k2]))) return prev.value
       const value = fn()
-      store[i] = { value, deps }
+      store.set(k, { value, deps })
       return value
     },
     useEffect(fn, deps) {
-      const i = cursor++
-      const prev = store[i]
-      if (Array.isArray(prev) && deps !== undefined && deps.length === prev.length && deps.every((d, k) => Object.is(d, prev[k]))) return
-      store[i] = deps === undefined ? [] : deps
+      const [k, prev] = slot()
+      if (Array.isArray(prev) && deps !== undefined && deps.length === prev.length && deps.every((d, k2) => Object.is(d, prev[k2]))) return
+      store.set(k, deps === undefined ? [] : deps)
       effects.push(fn)
     },
   }
@@ -436,7 +437,7 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   const expand = (node, out) => {
     if (node === null || node === undefined || typeof node !== 'object') return
     if (Array.isArray(node)) { for (const child of node) expand(child, out); return }
-    if (typeof node.type === 'function' && !HOSTCOMP.has(node.type)) { expand(node.type(node.props || {}), out); return }
+    if (typeof node.type === 'function' && !HOSTCOMP.has(node.type)) { const prev = enter(node.type.name || 'C'); let child; try { child = node.type(node.props || {}) } finally { exit(prev) } expand(child, out); return }
     out.push(node)
     expand((node.props || {}).children, out)
   }
@@ -465,7 +466,7 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
       if (n === null || n === undefined) return
       if (typeof n !== 'object') { parts.push(String(n)); return }
       if (Array.isArray(n)) { for (const c of n) walk(c); return }
-      if (typeof n.type === 'function') { walk(n.type(n.props || {})); return }
+      if (typeof n.type === 'function') { const prev = enter(n.type.name || 'T'); let child; try { child = n.type(n.props || {}) } finally { exit(prev) } walk(child); return }
       walk((n.props || {}).children)
     }
     walk((node.props || {}).children)
@@ -481,9 +482,14 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   // is in force and let the reader change it. Asserted through the rendered tree, so
   // a panel that stops drawing fails here instead of only in a browser.
   const routeHead = nodes.find((n) => /data-route-panel/.test(JSON.stringify(n.props || {})))
-  const routeButtons = btns(nodes).filter((n) => /设为当前|取消路由/.test(textOf(n)))
-  check('5w the routes panel renders one row per declared route', routeButtons.length === 2, 'route buttons=' + routeButtons.length + ' all=' + btns(nodes).map(textOf).slice(0, 6).join(' | '))
-  check('5w2 the in-force route is labelled, not guessed', routeButtons.some((n) => /取消路由/.test(textOf(n))) && routeButtons.some((n) => /设为当前/.test(textOf(n))), routeButtons.map(textOf).join(' | '))
+  // There is no activate control any more: a pool is selected in the model picker,
+  // which is the only place a model choice belongs. The panel declares routes and
+  // edits them; it does not decide which one a session runs.
+  const activateBtns = btns(nodes).filter((n) => /设为当前|取消路由/.test(textOf(n)))
+  check('5w the routes panel no longer offers an activate control', activateBtns.length === 0, 'found=' + activateBtns.map(textOf).join(' | '))
+  check('5w2 every declared route still has its own row controls',
+    btns(nodes).filter((n) => /删除/.test(textOf(n))).length >= 2,
+    'delete buttons=' + btns(nodes).filter((n) => /删除/.test(textOf(n))).length)
   check('5w3 a round-robin route shows its strategy and sticky limit', nodes.some((n) => /轮换 x2/.test(textOf(n))) || btns(nodes).concat(nodes).some((n) => /轮换 x2/.test(textOf(n))), '')
   // A member the roster lost is named in the row's own warning line, not only when
   // the route happens to be expanded: a chain that silently shrank would send the
@@ -554,8 +560,13 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     selectEls.length > 0 ? JSON.stringify(selectEls[0].props.children && selectEls[0].props.children.map((o) => o.props.value)) : 'none')
 
   const before = postBodies.length
+  // The route panel has no Save button of its own any more: the panel above owns
+  // one, and a page-level control that persisted a row typed two panels away was
+  // the confusion this removal ends. Every edit therefore writes immediately, and
+  // that is what these two assertions now pin.
   const saveBtn = btns(afterExpand).find((n) => /^保存路由$/.test(textOf(n)))
-  check('5x3 save is disabled until something is edited', saveBtn !== undefined && saveBtn.props.disabled === true, saveBtn === undefined ? 'no save button' : 'disabled=' + saveBtn.props.disabled)
+  check('5x3 the route panel has no save button of its own', saveBtn === undefined,
+    saveBtn === undefined ? 'gone' : 'still there')
 
   // Flip the strategy: that stages a draft, which both enables save and reveals the
   // sticky-limit control the round-robin mode needs.
@@ -563,22 +574,23 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
     selectEls[0].props.onChange({ target: { value: 'round-robin' } })
     const staged = await settle()
     check('5x4 choosing round-robin reveals its sticky limit', staged.some((n) => n.type === "input" && n.props && n.props.type === "number" && /连任轮数/.test(String(n.props["aria-label"] || ""))), staged.filter((n) => n.type === "input").map((n) => String(n.props["aria-label"] || n.props.type)).join(','))
-    const saveNow = btns(staged).find((n) => /^保存路由$/.test(textOf(n)))
-    check('5x5 an edit enables save', saveNow !== undefined && saveNow.props.disabled === false, saveNow === undefined ? 'no save' : 'disabled=' + saveNow.props.disabled)
-    if (saveNow !== undefined) {
-      click(saveNow)
-      await settle()
-      const posted = postBodies.slice(before).find((b) => b.scope === 'routes')
-      check('5x6 saving posts the whole route table', posted !== undefined && Array.isArray(posted.routes) && posted.routes.some((r) => r.strategy === 'round-robin'), JSON.stringify(posted && posted.routes && posted.routes.map((r) => r.name + ':' + r.strategy)))
-    }
+    // No button to press: the edit itself wrote the table, which is the whole
+    // point of removing Save from this panel.
+    const posted = postBodies.slice(before).find((b) => b.scope === 'routes')
+    check('5x5 an edit writes the table immediately',
+      posted !== undefined && Array.isArray(posted.routes) && posted.routes.some((r) => r.strategy === 'round-robin'),
+      JSON.stringify(posted && posted.routes && posted.routes.map((r) => r.name + ':' + r.strategy)))
+    check('5x6 the write carries the whole table, never a per-row patch',
+      posted !== undefined && Array.isArray(posted.routes) && posted.routes.length >= 1,
+      'routes=' + (posted && posted.routes ? posted.routes.length : 'none'))
   }
 
 
   // Clearing a route is the *absence* of a name, not the name with enabled=false:
   // the host reads the name, and posting it again would re-set the route the button
   // was supposed to clear.
-  const clearBtn = routeButtons.find((n) => /取消路由/.test(textOf(n)))
-  if (clearBtn !== undefined) { click(clearBtn); await settle() }
+  // (the activate control was removed: a pool is chosen in the model picker, so there
+  // is no in-panel button whose click would post an empty route name any more.)
   // Collapse the editor again: a reader closes the fold after editing, and the
   // search assertions below count monospace name spans - which the expanded member
   // list legitimately contributes. Leaving it open would make the roster filter look
@@ -658,7 +670,11 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
   }
   check('5x7 the editor folds back to a header', !nodes.some((n) => n.type === "select"), String(nodes.filter((n) => n.type === "select").length))
 
-  check('5w6 clearing the route posts an empty name', postBodies.some((b) => b.scope === 'route' && b.key === ''), JSON.stringify(postBodies.filter((b) => b.scope === 'route')))
+  // Nothing on this panel names a route to activate, so nothing posts an empty key:
+  // the absence is the property worth pinning, not a click that no longer exists.
+  check('5w6 no panel control can post an activation',
+    !postBodies.some((b) => b.scope === 'route' && b.key !== undefined && String(b.key).trim() === ''),
+    JSON.stringify(postBodies.filter((b) => b.scope === 'route')).slice(0, 160))
 
 
   // The button's direction, not just its shape: a channel offered as "关闭本渠道"
@@ -839,6 +855,148 @@ check('4j expand-all and collapse-all write both layers', /foldAll\(false\)/.tes
       clearBtn.props.onClick()
       fnodes = await settle()
       check('5z2 the clear button empties the box', findInput(fnodes).props.value === '', JSON.stringify(findInput(fnodes).props.value))
+    }
+  }
+  // ---- 5-tab. the bar sorts the page; nothing unmounts on a switch --------
+  {
+    let tn = await settle()
+    const tabBtns = tn.filter((n) => n.type === 'button' && n.props && typeof n.props['data-tab'] === 'string')
+    const pressed = tabBtns.filter((n) => n.props['aria-pressed'] === true)
+    check('5ta the tab bar names every panel',
+      tabBtns.length === 5 && tabBtns.map((n) => n.props['data-tab']).join(',') === 'general,failover,cooldown,models,routes',
+      tabBtns.map((n) => n.props['data-tab']).join(','))
+    check('5tb the page lands on its first tab',
+      pressed.length === 1 && pressed[0].props['data-tab'] === 'general',
+      pressed.map((n) => n.props['data-tab']).join(','))
+    const fieldPanes = tn.filter((n) => n.type === 'div' && n.props && typeof n.props['data-tab-pane'] === 'string' && n.props['data-tab-pane'] !== 'routes')
+    check('5tc every field keeps a pane in the tree', fieldPanes.length === 18, 'panes=' + fieldPanes.length)
+    const modelsRoot = tn.find((n) => n.props && n.props['data-model-list'] === true)
+    check('5td the roster panel stays mounted off-tab',
+      modelsRoot !== undefined && modelsRoot.props.style.display === 'none',
+      modelsRoot === undefined ? 'gone' : String(modelsRoot.props.style.display))
+    const failoverBtn = tabBtns.find((n) => n.props['data-tab'] === 'failover')
+    if (failoverBtn !== undefined) {
+      click(failoverBtn)
+      tn = await settle()
+      const p2 = tn.filter((n) => n.type === 'button' && n.props && n.props['aria-pressed'] === true)
+      const shown = tn.filter((n) => n.type === 'div' && n.props && n.props['data-tab-pane'] === 'failover' && n.props.style && n.props.style.display === 'block')
+      check('5te switching tabs swaps the shown panes',
+        p2.length === 1 && p2[0].props['data-tab'] === 'failover' && shown.length === 6, 'shown=' + shown.length)
+    }
+    const modelsBtn = (await settle()).find((n) => n.type === 'button' && n.props && n.props['data-tab'] === 'models')
+    if (modelsBtn !== undefined) {
+      click(modelsBtn)
+      tn = await settle()
+      const mr = tn.find((n) => n.props && n.props['data-model-list'] === true)
+      check('5tg the models tab draws the roster back',
+        mr !== undefined && mr.props.style.display === 'block',
+        mr === undefined ? 'gone' : String(mr.props.style.display))
+    }
+  }
+
+  // ---- 5-row-save. every row carries an explicit Save ---------------
+  {
+    const rn = await settle()
+    const rowSaves = rn.filter((n) => n.type === 'button' && n.props && typeof n.props['data-route-save'] === 'string')
+    check('5ra each declared route exposes its own save control',
+      rowSaves.length >= 2, 'row save buttons=' + rowSaves.length)
+    // It must actually post the table, not merely exist.
+    const before = postBodies.filter((b) => b.scope === 'routes').length
+    if (rowSaves.length > 0) {
+      click(rowSaves[0])
+      await settle()
+      const after = postBodies.filter((b) => b.scope === 'routes').length
+      check('5rb the row save writes the route table', after > before, 'posts=' + (after - before))
+    }
+  }
+  // ---- 5-frame. no page-wide footer save -------------------------------
+  {
+    // The host SettingsForm hardcodes <div class=footer><button>保存</button>, with
+    // no prop to omit it. That footer is what kept appearing under the tab bar no
+    // matter how many times the route panel's own save was removed - so the frame
+    // is drawn locally now and this asserts the two consequences.
+    const fn = await settle()
+    const frame = fn.find((n) => n.props && n.props['data-settings-frame'] === true)
+    check('5fa the settings frame is drawn by the page, not the host form',
+      frame !== undefined, frame === undefined ? 'host SettingsForm still in use' : 'ok')
+    // Per-tab commit exists, and is inert until this tab holds an edit.
+    // A tab that owns staged fields offers the commit; a tab that writes every
+    // edit immediately (routes) must not offer one, because there would be
+    // nothing for it to do - and a dead Save at the bottom is what made
+    // "how do I save a new route" a question.
+    const onRoutes = fn.find((n) => n.type === 'button' && n.props && n.props['data-tab-save-button'] === true)
+    check('5fb a tab with no staged fields offers no commit', onRoutes === undefined,
+      onRoutes === undefined ? 'ok' : 'a Save is rendered on the routes tab')
+    const generalBtn = fn.find((n) => n.type === 'button' && n.props && n.props['data-tab'] === 'general')
+    if (generalBtn !== undefined) {
+      click(generalBtn)
+      const gn = await settle()
+      const tabSave = gn.find((n) => n.type === 'button' && n.props && n.props['data-tab-save-button'] === true)
+      check('5fc a tab with staged fields offers the commit, inert while clean',
+        tabSave !== undefined && tabSave.props.disabled === true,
+        tabSave === undefined ? 'missing' : 'disabled=' + String(tabSave.props.disabled))
+    }
+  }
+  // ---- 5-pick. select-all and invert act on the visible list only ---------
+  {
+    let pn = await settle()
+    const toggle = btns(pn).find((n) => /^多选添加$/.test(textOf(n).trim()))
+    if (toggle !== undefined) {
+      click(toggle)
+      pn = await settle()
+      const allBtn = pn.find((n) => n.type === 'button' && n.props && n.props['data-route-pick-all'] === true)
+      const invBtn = pn.find((n) => n.type === 'button' && n.props && n.props['data-route-pick-invert'] === true)
+      check('5pa the picker offers select-all and invert', allBtn !== undefined && invBtn !== undefined,
+        'all=' + (allBtn !== undefined) + ' invert=' + (invBtn !== undefined))
+      if (allBtn !== undefined) {
+        click(allBtn)
+        pn = await settle()
+        const boxes = pn.filter((n) => n.type === 'input' && n.props && typeof n.props['data-route-pick'] === 'string')
+        const ticked = boxes.filter((n) => n.props.checked === true).length
+        check('5pb select-all ticks every visible model', boxes.length > 0 && ticked === boxes.length,
+          'ticked=' + ticked + '/' + boxes.length)
+        if (invBtn !== undefined) {
+          click(invBtn)
+          pn = await settle()
+          const after = pn.filter((n) => n.type === 'input' && n.props && typeof n.props['data-route-pick'] === 'string')
+          const tickedAfter = after.filter((n) => n.props.checked === true).length
+          check('5pc invert clears exactly what was ticked', tickedAfter === 0, 'ticked=' + tickedAfter)
+        }
+      }
+    }
+  }
+  // ---- 5-save. a tab's Save only commits that tab -------------------------
+  {
+    check('5sa the controller exposes a tab-scoped save and discard',
+      typeof face.saveTab === 'function' && typeof face.discardTab === 'function',
+      'saveTab=' + typeof face.saveTab + ' discardTab=' + typeof face.discardTab)
+    const controller = face.__controller
+    check('5sb the controller is reachable for the scoped assertions', controller !== undefined, String(controller))
+    if (controller !== undefined) {
+      const staging = new Map([['maxCandidates', { text: '7' }], ['cooldownBaseMs', { text: '9000' }]])
+      controller.form.staged = staging
+      let seenDuringSave = null
+      let hostSaves = 0
+      const realSave = controller.form.save
+      controller.form.save = async () => {
+        hostSaves += 1
+        seenDuringSave = [...staging.keys()]
+        return true
+      }
+      let published = 0
+      controller.form.publish = () => { published += 1 }
+      await controller.saveTab(['maxCandidates'])
+      check('5sc only this tab is staged while the host saves',
+        seenDuringSave !== null && seenDuringSave.length === 1 && seenDuringSave[0] === 'maxCandidates',
+        'during=' + String(seenDuringSave))
+      check('5sd the other tab is still staged afterwards',
+        staging.has('cooldownBaseMs'), 'left=' + [...staging.keys()].join(','))
+      check('5se it ran the host save once and republished',
+        hostSaves === 1 && published > 0, 'saves=' + hostSaves + ' publishes=' + published)
+      controller.discardTab(['cooldownBaseMs'])
+      check('5sf a tab-scoped discard clears only that tab',
+        staging.size === 1 && staging.has('maxCandidates'), 'left=' + [...staging.keys()].join(','))
+      controller.form.save = realSave
     }
   }
   delete globalThis.fetch

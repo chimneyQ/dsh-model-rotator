@@ -1497,8 +1497,10 @@ const quietHandle = (value) => ({
     const first = attempts[0]
     return attempts.find(a => a !== first)
   }
-  check('a healthy pin is tried first after the current model',
-    healthy[0] === 'provA/alpha' && secondModel(healthy) === 'provA/beta',
+  // A pin is an explicit request for this head: the pin HEADS the walk, and the
+  // session model keeps its seat in the order (still tried, never lost).
+  check('a healthy pin heads the walk',
+    healthy[0] === 'provA/beta' && healthy.includes('provA/alpha'),
     'order=' + healthy.join(','))
 
   // Hydration is a once-per-boot step, so a second harness in this process would
@@ -1861,25 +1863,40 @@ const quietHandle = (value) => ({
     return h
   }
 
-  // 25a: an ordered route heads the walk, right after the model the turn started on.
+  // 25a: with a pool active, a turn whose model belongs to that pool walks the pool.
+  // The premise is deliberate: nobody leaves the picker empty, so the turn always
+  // carries an explicit model. When that model is a member of the declared route,
+  // the route is what the user meant and it leads; when it is NOT, the user's own
+  // pick outranks the declaration (25a2).
   const ordered = await routesPair({
     routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
     activeRoute: 'write',
   })
-  await collect(ordered.run({ provider: 'provA', model: 'alpha', messages: [] }))
-  check('25a a declared route is tried before the measured ranking',
-    ordered.attempted[0] === 'provA/alpha' && ordered.attempted[1] === 'provB/gamma' && ordered.attempted[2] === 'provA/beta',
+  await collect(ordered.run({ provider: 'provA', model: 'beta', messages: [] }))
+  check('25a an active route heads the walk in its own order',
+    ordered.attempted[0] === 'provB/gamma' && ordered.attempted[1] === 'provA/beta',
     'attempted=' + ordered.attempted.join(','))
+
+  // 25a2: the user picks a model that is NOT in the declared route. That pick wins:
+  // a declared default must never rewrite a model chosen by hand.
+  const bypass = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
+    activeRoute: 'write',
+  })
+  await collect(bypass.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('25a2 an explicit pick outside the route is not displaced by it',
+    bypass.attempted[0] === 'provA/alpha',
+    'attempted=' + bypass.attempted.join(','))
 
   // 25b: fallback restarts at the head every turn - that is what makes it predictable.
   const twice = await routesPair({
     routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
     activeRoute: 'write',
   })
-  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  await collect(twice.run({ provider: 'provA', model: 'beta', messages: [] }))
   const firstTurn = twice.attempted.slice()
   twice.attempted.length = 0
-  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  await collect(twice.run({ provider: 'provA', model: 'beta', messages: [] }))
   check('25b fallback restarts from the head on the next turn',
     JSON.stringify(firstTurn) === JSON.stringify(twice.attempted),
     'turn1=' + firstTurn.join(',') + ' turn2=' + twice.attempted.join(','))
@@ -1906,8 +1923,8 @@ const quietHandle = (value) => ({
   const stickyHeads = []
   for (let turn = 0; turn < 3; turn += 1) {
     sticky.attempted.length = 0
-    await collect(sticky.run({ provider: 'provA', model: 'alpha', messages: [] }))
-    stickyHeads.push(sticky.attempted[1])
+    await collect(sticky.run({ provider: 'provA', model: 'beta', messages: [] }))
+    stickyHeads.push(sticky.attempted[0])
   }
   check('25c2 stickyLimit keeps a member for that many turns',
     stickyHeads[0] === stickyHeads[1] && stickyHeads[1] !== stickyHeads[2],
@@ -2092,6 +2109,99 @@ const quietHandle = (value) => ({
 }
 
 
+// ---- scenario 33: a declared route is one selectable pool -------------------
+// The aggregation used to live only inside the walk: the picker kept showing the
+// session model, so "run this pool" was not an action anyone could take. A route
+// now publishes one live adapter route (combo:<name>), which is what the host's
+// picker lists - and selecting it makes that pool lead the turn.
+{
+  const mk = async (fileConfig) => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'rotator-combo-'))
+    const cfgPath = join(dir, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify(fileConfig), 'utf8')
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
+    const h = makeCtx((options, n) => (n <= 1
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited' } } }]
+      : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]))
+    const published = { names: [], replaces: 0 }
+    // Non-combo providers keep the harness's own roster stub: answering them with
+    // an empty catalog would make every route member look undispatched.
+    const baseRegistration = h.ctx.llm.registration
+    const lookup = () => {
+      h.ctx.llm.registration = (provider) => (published.names.includes(provider)
+        ? { adapter: h.ctx.llm.__comboAdapter }
+        : baseRegistration(provider))
+    }
+    h.ctx.llm.registerAdapter = (providers) => {
+      published.names = [...providers]
+      lookup()
+      return {
+        replace: (next) => {
+          published.replaces += 1
+          published.names = [...next]
+          lookup()
+        },
+      }
+    }
+    apply(h.ctx, { retriesPerModel: 0, confirmSwitch: false, maxCandidates: 6 }, {})
+    return { h, published }
+  }
+
+  const a = await mk({ routes: [{ name: 'free-pool', members: ['provA/beta', 'provB/gamma'] }], activeRoute: '' })
+  check('33a an enabled route is published as one combo pool',
+    JSON.stringify(a.published.names) === JSON.stringify(['combo:free-pool']),
+    JSON.stringify(a.published.names))
+
+  const b = await mk({
+    routes: [
+      { name: 'on', members: ['provA/beta'] },
+      { name: 'off', members: ['provB/gamma'], enabled: false },
+    ],
+    activeRoute: '',
+  })
+  check('33b a disabled route is not published into the picker',
+    JSON.stringify(b.published.names) === JSON.stringify(['combo:on']),
+    JSON.stringify(b.published.names))
+
+  const rows = await b.h.ctx.llm.registration('combo:on').adapter.listModels('combo:on')
+  check('33c the pool advertises itself as its catalog row',
+    Array.isArray(rows) && rows.length === 1 && rows[0].id === 'combo:on',
+    JSON.stringify(rows))
+
+  const d = await mk({
+    routes: [
+      { name: 'chosen', members: ['provB/gamma'] },
+      { name: 'declared', members: ['provA/beta'] },
+    ],
+    activeRoute: 'declared',
+  })
+  await collect(d.h.run({ provider: 'combo:chosen', model: 'combo:chosen', messages: [] }))
+  check('33d a selected pool outranks activeRoute for that turn',
+    d.h.attempted[0] === 'provB/gamma',
+    'attempted=' + d.h.attempted.join(','))
+  // The picker does not read listModels() alone: buildModelCatalog() (the host's
+  // session/modelCatalog remote) calls resolveModelInfo() for EVERY row and files
+  // a provider under `failures` - not `groups` - when that throws. Publishing a
+  // pool is therefore not the same as the pool being SELECTABLE, and only this
+  // assertion covers the difference.
+  {
+    const adapter = d.h.ctx.llm.__comboAdapter
+    const info = adapter === undefined ? null : await adapter.resolveModel('combo:chosen', 'combo:chosen')
+    const valid = info !== null
+      && info.provider === 'combo:chosen' && info.id === 'combo:chosen'
+      && typeof info.name === 'string' && info.name.length > 0
+      && (info.description === undefined || typeof info.description === 'string')
+      && Number.isInteger(info.context?.contextWindow) && info.context.contextWindow > 0
+    check('33f the pool passes the exact-model validation the picker runs', valid, JSON.stringify(info))
+    // And the honest contract shape, in case the host is stricter later:
+    check('33g the pool advertises a context window the host accepts',
+      valid && info.context.contextWindow >= 1, JSON.stringify(info?.context))
+  }
+  check('33e a pool name is never dispatched as a model',
+    !d.h.attempted.includes('combo:chosen/combo:chosen'),
+    'attempted=' + d.h.attempted.join(','))
+}
 // ---- scenario 26: a turn the caller cancelled is not a failed model ----------
 //
 // Stop, a deadline, a closed client: the provider ends the stream with a finish of

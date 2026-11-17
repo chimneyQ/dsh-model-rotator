@@ -401,6 +401,16 @@ that renders the form in two host cells from one component:
 - the **model-rotator** card in the Plugins panel (`plugins.item`), which
   renders the same form as its card body.
 
+The page is sorted into five tabs - **Master**, **Switch policy**, **Cooldown &
+breaker**, **Model list**, **Routes** - and it opens on Master. Two rules hold
+the design together: a field's tab is data on its spec (a field nobody assigned
+throws at render rather than silently leaving the page), and the tabs answer by
+*visibility only* - the roster, its fetches and folds, and the route editor with
+its unsaved drafts stay mounted under every tab, so switching never loses the
+chain being arranged. Save and Discard are scoped to the tab that owns them: a
+tab's Save commits only that tab's fields and leaves the other tabs' drafts
+untouched.
+
 Both cells only appear while the host actually serves the namespace. Only the
 fields that are safe to personalize appear there:
 

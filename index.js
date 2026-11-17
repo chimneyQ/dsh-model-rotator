@@ -1693,6 +1693,9 @@ export function apply(ctx, config = {}, runtime = {}) {
     for (const entry of Array.isArray(providers) ? providers : []) {
       const provider = entry !== null && typeof entry === 'object' && typeof entry.id === 'string' ? entry.id : ''
       if (provider === '') continue
+      // Our own aggregation routes are pools, not models: a pool must never
+      // enter the roster or every consumer would treat it as a candidate body.
+      if (provider.startsWith(COMBO_PREFIX)) continue
       // The vendor's own label, when the adapter published one. Kept beside the id
       // (never instead of it): the id is the routing key, the label is for people.
       // The registered route carries the vendor's own label in `name` (the host
@@ -2211,14 +2214,42 @@ export function apply(ctx, config = {}, runtime = {}) {
       familyCount.set(family, used + 1)
       byFamily.push(row)
     }
-    // A declared route is the user's own order, so it goes in front of the measured
-    // ranking - right after the model the turn started on, which is never moved.
+    // A declared route is the user's own order, and it HEADS the walk: choosing a
+    // route aggregates its members into ONE entry point - "this conversation runs
+    // on this pool" - so the turn starts from the route's head instead of from
+    // whatever model the picker happens to display. The model the turn started on
+    // keeps a seat behind the pool as the fallback the pool itself never displaced;
+    // when it IS a pool member, the strategy decides its position.
     // routeMembers() advances the round-robin cursor when called without peek,
     // because this IS the per-turn decision; the model list and the status tool pass
     // peek:true so reading the state cannot rotate the walk.
-    const route = activeRoute(cfg)
+    // Which pool leads this turn.
+    //
+    // A combo selection is the user picking a pool by name in the model picker,
+    // so it leads. `activeRoute` is only a DEFAULT for turns the user did not
+    // choose for: it is a declared preference, and a declared preference must
+    // never override a model the user picked by hand. Nobody leaves the picker
+    // empty - every turn carries an explicit provider/model - so treating
+    // activeRoute as "lead unconditionally" silently rewrote the user's choice
+    // on every single turn. It now applies only when that choice IS a member of
+    // the route, i.e. when the user picked the pool or one of its members.
+    const selected = options.__comboRoute ?? null
+    const declared = activeRoute(cfg)
+    const pickedIsMember = declared === null ? false : routeMembers(declared, pairs, cfg, { peek: true })
+      .some(pair => pair.provider === current.provider && pair.model === current.model)
+    const route = selected ?? (pickedIsMember ? declared : null)
     const routed = route === null ? [] : routeMembers(route, pairs, cfg)
-    const ordered = [current, ...routed]
+    const currentKey = current.provider + '/' + current.model
+    // A combo dispatch names the POOL, not a member: that name has no model
+    // behind it, so it is never seated in its own walk.
+    const startIsPool = String(current.provider ?? '').startsWith(COMBO_PREFIX)
+    const ordered = startIsPool
+      ? [...routed]
+      : routed.length === 0
+        ? [current]
+        : routed.some(pair => pair.provider + '/' + pair.model === currentKey)
+          ? [...routed]
+          : [...routed, current]
     const placed = new Set(ordered.map(pair => pair.provider + '/' + pair.model))
     for (const row of byFamily) {
       const key = row.pair.provider + '/' + row.pair.model
@@ -2395,8 +2426,184 @@ export function apply(ctx, config = {}, runtime = {}) {
    * ctx.llm.stream() whose options are pre-marked so this listener stays out of
    * its own way.
    */
+  // ---- combo routes: the declared pool as one selectable entry --------------
+
+  /** The routes this plugin publishes into the model picker. */
+  function comboRoutes(cfg) {
+    return cfg.routes.filter(route => route.enabled !== false
+      && String(route.name ?? '').trim() !== ''
+      && Array.isArray(route.members) && route.members.length > 0)
+  }
+
+  /**
+   * The declared route a combo provider id names, or null.
+   *
+   * `combo:<name>` is how a pool appears in the picker; anything else - a real
+   * provider, an empty value, a route deleted or disabled while the conversation
+   * still names it - answers null and the ordinary walk decides. Degrading is
+   * the point: a stale selection must not fail a turn.
+   */
+  function comboRouteOf(provider, cfg) {
+    const id = String(provider ?? '')
+    if (!id.startsWith(COMBO_PREFIX)) return null
+    const name = id.slice(COMBO_PREFIX.length).trim()
+    if (name === '') return null
+    const route = cfg.routes.find(entry => entry.name === name)
+    if (route === undefined || route.enabled === false) return null
+    return route
+  }
+
+  /** The catalog row one combo route advertises: the pool, named. */
+  function comboModel(name) {
+    return {
+      provider: COMBO_PREFIX + name,
+      id: COMBO_PREFIX + name,
+      name: '聚合路由 · ' + name,
+      description: '把几个模型聚合成一个入口：回合从路由头部开始跑，成员之间按策略推进。',
+    }
+  }
+
+  /**
+   * The adapter behind every combo route.
+   *
+   * Deliberately thin: the aggregation happens in the walk, not here. This
+   * exists so the pool has a NAME the picker lists and a ROUTE the host accepts
+   * a selection for.
+   */
+  const comboAdapter = {
+    /**
+     * The host calls this for every route it prepares (see LlmRuntime.prepareRoutes):
+     * a registration that cannot answer is refused outright, which is exactly how
+     * the pool silently failed to appear in the picker. The base adapter's own
+     * answer is "no policy, use the defaults", so this returns undefined - but it
+     * has to EXIST as a function.
+     */
+    providerRetryPolicy() {
+      return undefined
+    },
+    /** Image pricing: a pool does not price images of its own. */
+    imageRequestPricing() {
+      return undefined
+    },
+    /** Image target: keep the image as the member adapter would receive it. */
+    imageRequestTarget(_provider, _model, image) {
+      return image
+    },
+    providerInfo(provider) {
+      return { id: provider, name: '聚合路由（model-rotator）' }
+    },
+    listModels(provider) {
+      const name = String(provider).slice(COMBO_PREFIX.length)
+      const present = comboRoutes(currentConfig()).some(route => route.name === name)
+      return Promise.resolve(present ? [comboModel(name)] : [])
+    },
+    /**
+     * The exact-model metadata the host validates before it will list a route.
+     *
+     * buildModelCatalog() calls resolveModelInfo() for every catalog row and
+     * files a provider under `failures` - not `groups` - when this throws, which
+     * is why a published pool could still be invisible in the picker. The pool
+     * answers with the widest window among its usable members: it can carry at
+     * least that much, and the host uses this number for its window reserve.
+     */
+    async resolveModel(provider, model) {
+      const name = String(provider).slice(COMBO_PREFIX.length)
+      const route = currentConfig().routes.find(entry => entry.name === name)
+      let contextWindow = 0
+      if (route !== undefined) {
+        const members = Array.isArray(route.members) ? route.members : []
+        for (const key of members) {
+          const slash = key.indexOf('/')
+          if (slash <= 0) continue
+          const memberProvider = key.slice(0, slash)
+          const memberModel = key.slice(slash + 1)
+          try {
+            const resolved = await llmRef()?.resolveModelInfo?.(memberProvider, memberModel)
+            const window = resolved?.context?.contextWindow
+            if (Number.isInteger(window) && window > contextWindow) contextWindow = window
+          } catch {
+            // A member that cannot answer simply does not contribute a window.
+          }
+        }
+      }
+      // A window the host will accept when no member could be measured: the
+      // smallest positive integer it validates, rather than a made-up large one.
+      if (!Number.isInteger(contextWindow) || contextWindow <= 0) contextWindow = 1
+      return {
+        provider,
+        id: model,
+        name: comboModel(name).name,
+        description: comboModel(name).description,
+        context: { contextWindow },
+      }
+    },
+    stream() {
+      // Unreachable in normal use: the listener claims a combo dispatch before
+      // the registry is consulted. A direct call means the listener was skipped,
+      // and silence would hang the turn - fail visibly instead.
+      return (async function* comboRefused() {
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { message: 'model-rotator: a combo route was dispatched outside the rotator listener' },
+          },
+        }
+      })()
+    },
+  }
+
+  /** The live registration handle, and the joined names it currently holds. */
+  let comboHandle = null
+  let comboHeld = ''
+
+  /**
+   * Publish (or withdraw) the combo routes.
+   *
+   * Called at mount and after any route write. One reused handle keeps the
+   * catalog update atomic: replace() swaps the whole set synchronously, so no
+   * observer sees a half-published table.
+   */
+  /** What the last publication attempt did, for the status tool. */
+  let comboPublishNote = 'not attempted'
+
+  function publishComboRoutes() {
+    const llm = llmRef()
+    if (typeof llm?.registerAdapter !== 'function') {
+      comboPublishNote = 'llm.registerAdapter is unavailable; no picker entries published'
+      return
+    }
+    // Kept on the service so an offline harness can answer registration(provider)
+    // with the same adapter object the plugin registered.
+    llm.__comboAdapter = comboAdapter
+    const names = comboRoutes(currentConfig()).map(route => COMBO_PREFIX + route.name)
+    const joined = names.join('|')
+    if (comboHandle !== null && joined === comboHeld) return
+    try {
+      if (comboHandle === null) comboHandle = llm.registerAdapter(names, comboAdapter)
+      else comboHandle.replace(names)
+      comboHeld = joined
+      comboPublishNote = 'published [' + names.join(', ') + ']'
+    } catch (error) {
+      comboPublishNote = 'failed: ' + String(error?.message ?? error)
+      // A foreign owner of one of these ids is survivable: keep the set already
+      // published and let the walk honour the routes anyway - the picker entry
+      // is a convenience, the aggregation is the feature.
+      warn('combo route publication failed: ' + String(error?.message ?? error))
+    }
+  }
+
   async function* rotateStream(options, next) {
     const cfg = currentConfig()
+    /**
+     * The pool this turn was dispatched to, when the user selected a combo route.
+     *
+     * Selecting `combo:<name>` is a statement about the WHOLE turn, so it
+     * outranks `activeRoute`: the named route must lead, or choosing between two
+     * pools would have no effect. Resolved against the live table, so a selection
+     * that outlived its route degrades to the ordinary walk instead of failing.
+     */
+    const comboRoute = comboRouteOf(options.provider, cfg)
     // Same captured service as discovery uses (see llmService). Cordis deactivates
     // a fiber's injected services while a turn is parked, and a live `ctx.llm` read
     // inside the walk then throws `cannot get required service "llm" in inactive
@@ -2404,13 +2611,25 @@ export function apply(ctx, config = {}, runtime = {}) {
     const llm = llmRef()
     let candidates
     try {
-      candidates = await rankCandidates(options, cfg)
+      candidates = await rankCandidates({ ...options, __comboRoute: comboRoute }, cfg)
     } catch (error) {
       warn('candidate discovery failed, running unrotated: ' + String(error))
       yield* next()
       return
     }
     if (candidates.length === 0) {
+      // A pool turn has no session model to fall back to: next() would dispatch
+      // combo:<name>, which no adapter serves a model for.
+      if (comboRoute !== null) {
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { message: 'model-rotator: route "' + comboRoute.name + '" has no usable member right now' },
+          },
+        }
+        return
+      }
       yield* next()
       return
     }
@@ -2453,6 +2672,17 @@ export function apply(ctx, config = {}, runtime = {}) {
     let hostRefusalSeen = false
     // '' = not asked yet this turn, otherwise 'allow' or 'deny'.
     let switchVerdict = ''
+    // True when the walk's head IS the model this turn was dispatched with: the
+    // harness path (next()) then answers for candidate 0. A route that heads the
+    // walk puts another model at index 0, and that model must be dispatched
+    // explicitly - next() can only ever run the turn's own model.
+    const turnKey = String(options.provider ?? '') + '/' + String(options.model ?? '')
+    // A combo dispatch names a POOL, and the host has no model behind that name:
+    // next() could only fail. Every candidate of a pool turn is an explicit
+    // dispatch, exactly like index > 0 on an ordinary turn.
+    const turnIsPool = String(options.provider ?? '').startsWith(COMBO_PREFIX)
+    const headIsTurnModel = !turnIsPool && candidates.length > 0
+      && candidates[0].provider + '/' + candidates[0].model === turnKey
     for (let index = 0; index < candidates.length; index += 1) {
       const pair = candidates[index]
       const key = pair.provider + '/' + pair.model
@@ -2471,9 +2701,10 @@ export function apply(ctx, config = {}, runtime = {}) {
         let stream = null
         let dispatchError = null
 
-        if (index > 0 || attempt > 0) {
-          // Every dispatch past the first one of the first candidate is a fresh
-          // ctx.llm.stream() call: the harness path (next()) exists only once.
+        if (index > 0 || attempt > 0 || !headIsTurnModel) {
+          // Every dispatch that is not the first one of the turn's own model is a
+          // fresh ctx.llm.stream() call: the harness path (next()) exists only once
+          // and can only ever run the model the turn was picked with.
           const retryOptions = { ...options, provider: pair.provider, model: pair.model }
           retryMarkers.add(retryOptions)
           try {
@@ -2650,7 +2881,11 @@ export function apply(ctx, config = {}, runtime = {}) {
           // behind a dead route. The conversation attempt that follows makes the
           // same decision with the right evidence.
           const adoptHere = cfg.adoptSwitchedModel && !hostRefusalSeen && !UNCONFIRMED_PURPOSES.has(String(options.purpose ?? ''))
-          if (index > 0 && flowed && adoptHere) adoptServedModel(pair)
+          // A route that heads the walk answered from its own first member: no
+          // failure and no switch happened, but the picker still names a model
+          // that did not answer. Keeping the display honest is adoption's job,
+          // and a route head was not the turn's model even at index 0.
+          if ((index > 0 || !headIsTurnModel) && flowed && adoptHere) adoptServedModel(pair)
           // Record which model answered instead of the one the reader picked.
           //
           // The record is kept unconditionally now: it is what the conversation's
@@ -2660,6 +2895,17 @@ export function apply(ctx, config = {}, runtime = {}) {
           // listener); the *record*, though, is filed right here so its session
           // is the one the dispatch ran under - a plugin route never gets one.
           if (index > 0) {
+          // The model the record and the notice speak of as displaced. When the
+          // walk started with the turn's own model, that is still it: the reader
+          // is looking at its name. When an active route led, the session model
+          // may never have been dispatched, and naming it "from" would blame a
+          // model that never failed - the honest from is the candidate that
+          // failed immediately before this answer, and its own failure is the
+          // reason owed.
+          const fromPair = headIsTurnModel
+            ? { provider: String(options.provider ?? ''), model: String(options.model ?? ''), displayName: displayNameOf(String(options.provider ?? '')) }
+            : candidates[index - 1]
+          const fromReason = headIsTurnModel ? startFailure : lastFailure
             // The record is written HERE, not at the turn boundary. A switch that
             // is only queued until some turn stops is not yet recorded, and the
             // queue is process-wide: a conversation that never stops a turn would
@@ -2669,15 +2915,15 @@ export function apply(ctx, config = {}, runtime = {}) {
             // this code both sees the switch and can name its conversation.
             appendSwitchLog({
               // The same provenance rule as the notice below: "from" is the model
-              // the turn was dispatched with, and the reason is that model's own
-              // failure, not the last candidate's.
+              // the walk actually displaced, and the reason is that model's own
+              // failure, not a later candidate's.
               from: {
-                provider: String(options.provider ?? ''),
-                model: String(options.model ?? ''),
-                displayName: displayNameOf(String(options.provider ?? '')),
+                provider: fromPair.provider,
+                model: fromPair.model,
+                displayName: fromPair.displayName ?? '',
               },
               to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
-              reason: classifyFailureKind(String(startFailure ?? lastFailure ?? '')),
+              reason: classifyFailureKind(String(fromReason ?? lastFailure ?? '')),
               at: Date.now(),
               purpose: String(options.purpose ?? ''),
               session: currentSessionForLog(),
@@ -2691,19 +2937,18 @@ export function apply(ctx, config = {}, runtime = {}) {
             const alreadyNamed = noticeQueue.some(entry => entry.to.model === pair.model)
             if (!alreadyNamed) {
               noticeQueue.push({
-                // "from" is the model the turn was dispatched with - the one the user
-                // is looking at - not the model of whichever attempt failed last.
+                // "from" is the model the walk actually displaced: the turn's own
+                // model when it led the walk, otherwise the previous candidate.
                 from: {
-                  provider: String(options.provider ?? ''),
-                  model: String(options.model ?? ''),
-                  displayName: displayNameOf(String(options.provider ?? '')),
+                  provider: fromPair.provider,
+                  model: fromPair.model,
+                  displayName: fromPair.displayName ?? '',
                 },
                 to: { provider: pair.provider, model: pair.model, displayName: pair.displayName ?? '' },
-                // The reason belongs to "from", so it comes from the starting
-                // model's own failure. Falling back to lastFailure keeps the
-                // notice populated when the starting model never reported one
-                // (a host refusal, an aborted turn).
-                reason: classifyFailureKind(String(startFailure ?? lastFailure ?? '')),
+                // The reason belongs to "from", so it comes from that model's own
+                // failure. Falling back to lastFailure keeps the notice populated
+                // when "from" never reported one (a host refusal, an aborted turn).
+                reason: classifyFailureKind(String(fromReason ?? lastFailure ?? '')),
                 // When it happened and which kind of call it was: the tab shows
                 // both, and "compaction" is the difference between a switch the
                 // reader saw and one that happened underneath their turn.
@@ -2753,12 +2998,14 @@ export function apply(ctx, config = {}, runtime = {}) {
           stat.failures += 1
           stat.lastError = failedBecause
           stat.lastErrorKind = failedKind
-          // The first candidate is the model the turn started on - the one the
-          // switch notice names as "from". Its own failure is the reason the
-          // reader is owed; later candidates only explain why the walk kept
-          // going. Only the first is kept, so a retry of the same model does not
-          // overwrite a more specific earlier verdict with a transient one.
-          if (index === 0 && startFailure === null) startFailure = failedBecause
+          // The turn's own model is the one the switch notice names as "from".
+          // Its failure is the reason the reader is owed; later candidates only
+          // explain why the walk kept going. It is found by key, not by index:
+          // an active route puts its pool in front, so the user's model is no
+          // longer automatically candidate 0. Only the first failure is kept, so
+          // a retry of the same model does not overwrite a more specific earlier
+          // verdict with a transient one.
+          if (key === turnKey && startFailure === null) startFailure = failedBecause
         }
 
         if (failureYielded !== null) {
@@ -2903,6 +3150,15 @@ export function apply(ctx, config = {}, runtime = {}) {
   } else {
     warn('llm.stream is unavailable; failover is disabled, tools remain mounted')
   }
+
+  // The pool entries the picker lists, published at mount and kept in step with
+  // the route table from then on (see the calls in the write paths below).
+  publishComboRoutes()
+  // Mount can run before the llm service is composed (or before another plugin
+  // released a provider id we want), and a failed first publication would leave
+  // the picker without the pool for the whole session. The host announces every
+  // registry change on this event, so it is also the retry point.
+  ctx.on('llm/adapters-updated', () => { try { publishComboRoutes() } catch { /* reported by the note */ } })
 
   /**
    * The switch notice, announced in the conversation.
@@ -3114,6 +3370,9 @@ export function apply(ctx, config = {}, runtime = {}) {
       return { ok: false, error: 'no route named \"' + wanted + '\" in config.json' }
     }
     const written = persistConfig({ activeRoute: wanted })
+    // The picker shows which pool leads; republish so the two surfaces cannot
+    // disagree about it.
+    publishComboRoutes()
     return { ok: true, activeRoute: wanted, persisted: written }
   }
   
@@ -3145,6 +3404,9 @@ export function apply(ctx, config = {}, runtime = {}) {
     const activeSurvives = active !== '' && normalized.some(route => route.name === active)
     if (!activeSurvives && active !== '') patch.activeRoute = ''
     const written = persistConfig(patch)
+    // The picker entry for a route is derived state: the table changed, so the
+    // published pool set has to change with it.
+    publishComboRoutes()
     return {
       ok: true,
       routes: normalized,
@@ -3666,6 +3928,10 @@ export function apply(ctx, config = {}, runtime = {}) {
         '  routes declared  : ' + (cfg.routes.length === 0
           ? '(none; set routes + activeRoute in config.json to pin an order)'
           : cfg.routes.map(route => route.name + ' [' + route.strategy + (route.strategy === 'round-robin' ? ' x' + route.stickyLimit : '') + ']' + (route.enabled === false ? ' (off)' : '')).join(', ')),
+        // Whether the pool is actually exposed to the model picker. A route that
+        // is "in force" but never published is invisible to the picker, and that
+        // is exactly the state this line has to make impossible to miss.
+        '  picker pool     : ' + comboPublishNote,
         '  breaker          : after ' + cfg.breakerFailures + ' consecutive failures a route rests '
           + Math.round(Math.max(cfg.maxCooldownMs, cfg.breakerRestMs) / 60000) + 'min (a run we cannot classify still counts)', 
         '  disabled models  : ' + (cfg.disabledModels.length === 0 ? '(none)' : joinNames(cfg.disabledModels, compact)),
