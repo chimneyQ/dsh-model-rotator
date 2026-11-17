@@ -564,6 +564,31 @@ suite restored `DSH_MODEL_ROTATOR_CONFIG` immediately after `apply()`, and the p
 resolves that path lazily on the first turn - so every route assertion read an absent
 file and the feature looked inert. Environment state is per-process, so a scenario that
 points it somewhere has to leave it there until its own assertions are done.
+
+**Scenarios 26-32** are the audit that produced 0.2.20, and they exist because the
+first four found behaviour the older assertions could not see:
+
+- **26** cancels a turn the way Stop does and asserts the **report** stays empty -
+  no failed route, no breaker - while the cancelled finish still reaches the
+  caller. **26d** repeats it five times, because the threshold is what matters and
+  one cancellation cannot show a run. 26c is the control: nothing after the cancel
+  is dialed, so the test cannot pass by being busy.
+- **27** ends a stream with no finish chunk and asserts the held `block-start` /
+  `usage` are delivered. The older suite only asserted what the caller must *not*
+  receive (2a), and a missing flush is exactly what such an assertion cannot see.
+- **28** counts `resolveModelInfo()` calls: the first turn resolves what it ranks,
+  the second resolves nothing at all.
+- **29** pushes the roster past its TTL and times the turn - a sweep that lands after
+  the turn answered is stale-while-revalidate, a sweep the turn waited for is not.
+- **30** makes the stream throw: a healthy peer must answer (30a) and, with
+  nothing left, the caller must get its own `socket hang up` back (30b).
+- **31** pins the four sentences from this install's `stats.json`, one per
+  classification the audit corrected.
+- **32** hangs one provider forever. 32a is what 29a/29b would have missed:
+  asserting a *slow* sweep does not catch a *hung* one, and a hung one is capped by
+  the budget only if the bypass exists. 32b then proves the bypass - the next turn
+  pays nothing.
+
 ## Install
 
 From npm (recommended):
@@ -599,9 +624,10 @@ that `dsh.profile.bundles` in `<DSH_HOME>/profiles/desktop/package.json` lists
 node test-offline.mjs     # failover + consent gate, against a stub harness
 node test-settings.mjs    # server-side settings contract, against the host rules
 node test-client.mjs      # browser bundle: loader shape, card registration, fields
+node release-check.mjs    # release self-check: manifest / files / exports / catalogue entry
 ```
 
-All three run with no network and no DSH process. `test-offline.mjs` (222
+All four run with no network and no DSH process. `test-offline.mjs` (248
 assertions) covers failure-then-retry, no-retry-once-text-flows, image-turn skip,
 all-candidates-failed, cooldown accounting, aborted-signal passthrough,
 non-chat filtering through a real waterfall, tool registration, and the consent

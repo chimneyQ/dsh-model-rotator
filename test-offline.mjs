@@ -2091,6 +2091,192 @@ const quietHandle = (value) => ({
     fieldCount >= 18, fieldLine)
 }
 
+
+// ---- scenario 26: a turn the caller cancelled is not a failed model ----------
+//
+// Stop, a deadline, a closed client: the provider ends the stream with a finish of
+// kind 'aborted' and the route itself told us nothing. Counting that as a failure
+// priced a healthy model out of the ranking (60s, doubling) and, five cancellations
+// in a row, tripped the breaker and rested it for six hours. Read from the report
+// the user reads, so the assertion covers the accounting and the display together.
+{
+  const ac = new AbortController()
+  const h = makeCtx(() => {
+    ac.abort()
+    return [{ type: 'finish', reason: { kind: 'aborted' } }]
+  })
+  apply(h.ctx, { retriesPerModel: 0 }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [], signal: ac.signal }))
+  const report = await h.registered.get('model_rotator_status').execute({ summary: true }, {})
+  const seen = report.split('\n').find(line => /last failure seen/.test(line)) ?? ''
+  check('26a a cancelled turn records no failure', /nothing recorded yet/.test(seen), seen.trim())
+  check('26b the cancelled finish still reaches the caller',
+    chunks.filter(c => c.type === 'finish' && c.reason?.kind === 'aborted').length === 1, JSON.stringify(chunks))
+  check('26c no candidate was dialed after the cancel', h.attempted.length === 1, 'attempted=' + h.attempted.join(','))
+
+  // Five cancellations in a row must not add up to a breaker.
+  for (let i = 0; i < 5; i += 1) {
+    const per = new AbortController()
+    const hh = makeCtx(() => { per.abort(); return [{ type: 'finish', reason: { kind: 'aborted' } }] })
+    apply(hh.ctx, { retriesPerModel: 0, breakerFailures: 2 }, {})
+    await collect(hh.run({ provider: 'provA', model: 'alpha', messages: [], signal: per.signal }))
+    if (i === 4) {
+      const last = await hh.registered.get('model_rotator_status').execute({ summary: true }, {})
+      check('26d five cancellations do not trip the breaker',
+        /nothing recorded yet/.test(last.split('\n').find(line => /last failure seen/.test(line)) ?? ''), '')
+    }
+  }
+}
+
+// ---- scenario 27: a stream that ends without a finish chunk ------------------
+// The chunks an attempt emits before its first content are held so a retry can drop
+// them. When the provider simply ends - no finish at all - they used to be dropped
+// with the attempt, so the caller received an empty turn.
+{
+  const h = makeCtx(() => [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'usage', usage: { totalTokens: 5 } },
+  ])
+  apply(h.ctx, {}, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('27a held chunks are delivered when the stream just ends',
+    chunks.length === 2 && chunks[0].type === 'block-start' && chunks[1].type === 'usage', JSON.stringify(chunks))
+}
+
+// ---- scenario 28: a window is resolved once, not once per turn ---------------
+// Every turn resolved the window of every discoverable route (240 adapter calls on a
+// 240-row roster): a model's context window is a catalog fact, not a per-turn one.
+{
+  const windows = { 'provA/alpha': 200000, 'provA/beta': 200000, 'provB/gamma': 200000 }
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }],
+    undefined, { pressure: { tokens: 1000, window: 128000 }, windows })
+  apply(h.ctx, {}, {})
+  let calls = 0
+  const realResolve = h.ctx.llm.resolveModelInfo
+  h.ctx.llm.resolveModelInfo = async (provider, model) => { calls += 1; return realResolve(provider, model) }
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const first = calls
+  calls = 0
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('28a the first turn resolves the windows it ranks', first > 0, 'resolved=' + first)
+  check('28b a later turn reuses them instead of re-resolving', calls === 0, 'resolved again=' + calls)
+}
+
+// ---- scenario 29: a stale roster is served, not re-swept on the turn ---------
+// The roster TTL was the turn's problem: once it lapsed, the next turn awaited a
+// full listModels() sweep - 15 seconds on the live install. It is now served stale
+// and refreshed behind the turn.
+{
+  const realNow = Date.now
+  let offset = 0
+  let listCalls = 0
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+  const realRegistration = h.ctx.llm.registration
+  h.ctx.llm.registration = (provider) => {
+    const entry = realRegistration(provider)
+    return { ...entry, adapter: { listModels: async (p) => { listCalls += 1; await new Promise(r => setTimeout(r, 60)); return entry.adapter.listModels(p) } } }
+  }
+  apply(h.ctx, {}, {})
+  try {
+    Date.now = () => realNow() + offset
+    const coldStart = realNow()
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const cold = realNow() - coldStart
+    offset += 61_000
+    const afterFirst = listCalls
+    const warmStart = realNow()
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const warm = realNow() - warmStart
+    check('29a the first turn pays the sweep', cold >= 50, 'cold=' + cold + 'ms')
+    check('29b a stale roster does not block the turn', warm < 40, 'stale turn=' + warm + 'ms')
+    await new Promise(r => setTimeout(r, 250))
+    check('29c the roster is refreshed behind the turn', listCalls > afterFirst, 'listModels calls=' + afterFirst + '->' + listCalls)
+  } finally {
+    Date.now = realNow
+  }
+}
+
+// ---- scenario 30: a stream that throws is a content-free failure -------------
+// A transport that throws instead of emitting a finish used to end the turn: the
+// exception travelled out of the wrapper, so the plugin never tried another route.
+{
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'unused' }])
+  h.ctx.llm.stream = (options) => {
+    h.attempted.push(options.provider + '/' + options.model)
+    return (async function* () {
+      if (options.provider === 'provA') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        throw new Error('socket hang up')
+      }
+      yield { type: 'text-delta', index: 0, text: 'from ' + options.model }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()
+  }
+  apply(h.ctx, { retriesPerModel: 0 }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('30a a throwing stream fails over to a working route',
+    chunks.some(c => c.type === 'text-delta' && c.text === 'from beta') || chunks.some(c => c.type === 'text-delta' && c.text === 'from gamma'),
+    'attempted=' + h.attempted.join(',') + ' chunks=' + JSON.stringify(chunks.map(c => c.type)))
+
+  // Nothing answers: the caller gets the provider's own exception, as it would
+  // without this plugin in the path.
+  const dead = makeCtx(() => [])
+  dead.ctx.llm.stream = (options) => (async function* () { throw new Error('socket hang up') })()
+  apply(dead.ctx, { retriesPerModel: 0 }, {})
+  let caught = ''
+  try { await collect(dead.run({ provider: 'provA', model: 'alpha', messages: [] })) } catch (error) { caught = String(error.message) }
+  check('30b with nothing left to try the original exception is rethrown', caught === 'socket hang up', JSON.stringify(caught))
+}
+
+// ---- scenario 31: the sentences this install actually answers with -----------
+// Read out of the live stats.json on 2026-11-16, where they sat unclassified: a
+// missing browser login, a provider whose request frequency wall says "频率超限",
+// a queue that timed out, and a provider this host has no adapter for at all.
+{
+  check('31a a missing browser login is an auth failure',
+    classifyFailureKind('还没有浏览器登录态。请在豆包卡片里点「重新登录」扫码一次。') === 'auth', '')
+  check('31b a frequency wall is a rate limit',
+    classifyFailureKind('raccoon: 您的模型请求频率超限，请稍后重试') === 'rate-limit', '')
+  check('31c a queue timeout is a rate limit',
+    classifyFailureKind('qoder: 排队等待超时') === 'rate-limit', '')
+  check('31d a provider with no adapter is a dead route',
+    classifyFailureKind('no adapter registered for provider "workbuddy"') === 'unsupported', '')
+}
+
+
+// ---- scenario 32: one wedged adapter cannot stall every turn -----------------
+// The sweep walks every provider's listModels() in turn, so one provider that never
+// answers used to hold the whole roster - and every turn behind it - hostage. The
+// first turn now gives up after the budget and the ones that follow do not pay it
+// again while the sweep is still outstanding.
+{
+  let hanging = false
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+  const realRegistration = h.ctx.llm.registration
+  h.ctx.llm.registration = (provider) => {
+    const entry = realRegistration(provider)
+    return {
+      ...entry,
+      adapter: {
+        listModels: async (p) => {
+          if (hanging && p === 'provB') await new Promise(() => {})
+          return entry.adapter.listModels(p)
+        },
+      },
+    }
+  }
+  hanging = true
+  apply(h.ctx, {}, {})
+  const t0 = Date.now()
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const cold = Date.now() - t0
+  check('32a a wedged adapter is capped by the first-sweep budget', cold < 4500, 'cold turn=' + cold + 'ms')
+  const t1 = Date.now()
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const second = Date.now() - t1
+  check('32b the next turn does not pay the same wait again', second < 500, 'second turn=' + second + 'ms')
+}
+
 const failed = results.filter(r => r[0] === 'FAIL')
 for (const r of results) console.log(r[0] + '  ' + r[1] + (r[2] ? '   [' + r[2] + ']' : ''))
 console.log('\n' + (failed.length === 0 ? 'ALL PASS (' + results.length + ')' : failed.length + ' FAILED of ' + results.length))
