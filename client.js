@@ -62,8 +62,14 @@ window.__ModuleLoader__.load({
       "note": "嵌套的权重（weights.connectivity / weights.speed）不在本页，需要时改 config.json。",
       "models.title": "模型列表",
       "models.hint": "扫描到的全部模型，按渠道分组。每行显示连通情况（可用 / 冷却中 / 额度耗尽 / 已关闭），可以逐个手动关闭或重新启用。",
+            "tabs.general": "总控",
+      "tabs.failover": "切换策略",
+      "tabs.cooldown": "冷却与熔断",
+      "tabs.models": "模型列表",
+      "tabs.routes": "路由",
       "models.loading": "正在读取模型列表…",
       "models.reload": "刷新",
+      "models.retry": "重试",
       "models.hide": "收起",
       "models.show": "展开",
       "models.empty": "还没有扫描到任何模型。",
@@ -109,8 +115,8 @@ window.__ModuleLoader__.load({
       "models.lastError": "最近错误",
       "models.never": "没有测量记录",
       "models.readOnly": "config.json 不可写，这次改动只对当前进程有效。",
-      "route.title": "路由（把几个模型串成一条链）",
-      "route.hint": "路由写在 config.json 的 routes 里，选中哪条就按它的顺序优先尝试；当前模型永远排在最前，不会因为路由而被换掉。",
+      "route.title": "路由（把几个模型聚合成一个入口）",
+      "route.hint": "设成当前只影响「你在模型选择器里选的就是这条路由（或它的成员）」的回合：那些回合从路由头部开始跑，成员之间按策略（顺序/轮换）推进。你在选择器里选了路由之外的模型时，以你的选择为准——声明不会改写手动选的模型。识图孪生（vision）不是第二个模型，不会出现在成员选择里。",
       "route.none": "还没有声明路由。在 config.json 里加 routes + activeRoute，就能指定一条固定的尝试顺序。",
       "route.active": "当前生效",
       "route.use": "设为当前",
@@ -119,15 +125,20 @@ window.__ModuleLoader__.load({
       "route.fallback": "顺序",
       "route.round-robin": "轮换",
       "route.memberCount": "{n} 个成员，{ok} 个可用",
+      "route.visionMember": "{names} 是识图孪生，永远不参与派发（它和普通模型是同一个模型）——请从成员里移除",
       "route.missing": "不在候选里：{names}",
       "route.switched": "已切换路由",
       "route.failed": "切换路由失败：",
       "route.new": "新建路由",
-      "route.save": "保存路由",
+      "route.save": "保存",
+      "route.savedOne": "已保存「{name}」",
       "route.saving": "保存中…",
+      "route.created": "已新建「{name}」并写盘（点右侧 ▸ 展开可编辑成员）",
       "route.saved": "路由已保存",
       "route.discard": "放弃修改",
       "route.delete": "删除",
+      "route.moveUp": "上移一位",
+      "route.moveDown": "下移一位",
       "route.newName": "新路由",
       "route.name": "名称",
       "route.strategy": "策略",
@@ -146,6 +157,8 @@ window.__ModuleLoader__.load({
       "route.pickHint": "只列出还没加入的（已加入 {n} 个）",
       "route.pickSelected": "已选 {n} 个",
       "route.pickAdd": "加入所选（{n}）",
+      "route.pickAll": "全选",
+      "route.pickInvert": "反选",
       "route.pickCancel": "取消",
       "route.pickNone": "没有可加入的模型",
       "route.pickTruncated": "仅显示前 {n} 个，用筛选缩小范围",
@@ -171,7 +184,8 @@ window.__ModuleLoader__.load({
       "switches.reason.auth": "认证失败",
       "switches.reason.server": "服务端错误",
       "switches.reason.unsupported": "模型不支持",
-      "switches.reason.none": "未记录原因"
+      "switches.reason.none": "未记录原因",
+      "discard": "放弃修改"
     };
     const en = {
       "title": "Model failover",
@@ -223,8 +237,14 @@ window.__ModuleLoader__.load({
       "note": "The nested weights (weights.connectivity / weights.speed) are not on this page; edit config.json for those.",
       "models.title": "Models",
       "models.hint": "Every discovered model, grouped by channel, with its health (usable / cooling / quota / off). Each row can be switched off or back on by hand.",
+            "tabs.general": "Master",
+      "tabs.failover": "Switch policy",
+      "tabs.cooldown": "Cooldown and breaker",
+      "tabs.models": "Model list",
+      "tabs.routes": "Routes",
       "models.loading": "Reading the model list…",
       "models.reload": "Refresh",
+      "models.retry": "Retry",
       "models.hide": "Hide",
       "models.show": "Show",
       "models.empty": "No model has been discovered yet.",
@@ -270,8 +290,8 @@ window.__ModuleLoader__.load({
       "models.lastError": "last error",
       "models.never": "no measurements yet",
       "models.readOnly": "config.json is not writable; this change applies to the running process only.",
-      "route.title": "Routes (a chain of models tried in order)",
-      "route.hint": "Routes live in routes in config.json. The chosen one is tried first, in its own order; the model the turn started on always stays first and is never replaced by a route.",
+      "route.title": "Routes (several models aggregated into one entry)",
+      "route.hint": "Being the current route only affects turns whose model you picked FROM that route (or from its members): those start at the route head and advance by strategy (in order / round-robin). Pick a model outside the route and your pick wins - a declaration never rewrites a model chosen by hand. Vision twins are the same model behind the image pipeline and never enter the member picker.",
       "route.none": "No route declared yet. Add routes and activeRoute to config.json to pin an order.",
       "route.active": "in force",
       "route.use": "Use this route",
@@ -280,15 +300,20 @@ window.__ModuleLoader__.load({
       "route.fallback": "in order",
       "route.round-robin": "round-robin",
       "route.memberCount": "{n} member(s), {ok} usable",
+      "route.visionMember": "{names} is a vision twin and is never dispatched (it is the same model behind the image pipeline) - remove it from the members",
       "route.missing": "not a candidate: {names}",
       "route.switched": "Route switched",
       "route.failed": "Could not switch the route: ",
       "route.new": "New route",
-      "route.save": "Save routes",
+      "route.save": "Save",
+      "route.savedOne": "Saved \"{name}\"",
       "route.saving": "Saving…",
+      "route.created": "Created \"{name}\" and wrote it to disk (expand ▸ to edit its members)",
       "route.saved": "Routes saved",
       "route.discard": "Discard changes",
       "route.delete": "Delete",
+      "route.moveUp": "Move up",
+      "route.moveDown": "Move down",
       "route.newName": "New route",
       "route.name": "Name",
       "route.strategy": "Strategy",
@@ -307,6 +332,8 @@ window.__ModuleLoader__.load({
       "route.pickHint": "Only models not already in this route ({n} in it)",
       "route.pickSelected": "{n} selected",
       "route.pickAdd": "Add selected ({n})",
+      "route.pickAll": "Select all",
+      "route.pickInvert": "Invert",
       "route.pickCancel": "Cancel",
       "route.pickNone": "Nothing left to add",
       "route.pickTruncated": "Showing the first {n}; narrow the filter to see more",
@@ -332,6 +359,7 @@ window.__ModuleLoader__.load({
       "switches.reason.auth": "auth failed",
       "switches.reason.server": "server error",
       "switches.reason.unsupported": "model unsupported",
+      "discard": "放弃修改",
       "switches.reason.none": "reason not recorded"
     };
 
@@ -342,7 +370,8 @@ window.__ModuleLoader__.load({
         readOnly: t("readOnly"),
         saveFailed: t("saveFailed"),
         save: t("save"),
-        saving: t("saving")
+        saving: t("saving"),
+        discard: t("discard")
       };
     }
     //#endregion
@@ -350,31 +379,45 @@ window.__ModuleLoader__.load({
     //#region lib/types/client/fields.js
     /** The fields this page owns, in the order it renders them. */
     const FIELDS = [
-  { field: 'enabled', kind: 'bool', label: 'enabled', hint: 'enabledHint' },
-  { field: 'maxCandidates', kind: 'number', label: 'maxCandidates', hint: 'maxCandidatesHint' },
-  { field: 'confirmSwitch', kind: 'bool', label: 'confirmSwitch', hint: 'confirmSwitchHint' },
-  { field: 'confirmTimeoutMs', kind: 'number', label: 'confirmTimeoutMs', hint: 'confirmTimeoutMsHint' },
-  { field: 'retriesPerModel', kind: 'number', label: 'retriesPerModel', hint: 'retriesPerModelHint' },
-  { field: 'retryBackoffMs', kind: 'number', label: 'retryBackoffMs', hint: 'retryBackoffMsHint' },
-  { field: 'preferSameModel', kind: 'bool', label: 'preferSameModel', hint: 'preferSameModelHint' },
-  { field: 'noticeSwitch', kind: 'bool', label: 'noticeSwitch', hint: 'noticeSwitchHint' },
-  { field: 'breakerFailures', kind: 'number', label: 'breakerFailures', hint: 'breakerFailuresHint' },
-  { field: 'breakerRestMs', kind: 'number', label: 'breakerRestMs', hint: 'breakerRestMsHint' },
-  { field: 'windowGuard', kind: 'bool', label: 'windowGuard', hint: 'windowGuardHint' },
-  { field: 'adoptSwitchedModel', kind: 'bool', label: 'adoptSwitchedModel', hint: 'adoptSwitchedModelHint' },
-  { field: 'cooldownBaseMs', kind: 'number', label: 'cooldownBaseMs', hint: 'cooldownBaseMsHint' },
-  { field: 'maxCooldownMs', kind: 'number', label: 'maxCooldownMs', hint: 'maxCooldownMsHint' },
-  { field: 'quotaCooldownMs', kind: 'number', label: 'quotaCooldownMs', hint: 'quotaCooldownMsHint' },
-  { field: 'quotaCooldownHour', kind: 'number', label: 'quotaCooldownHour', hint: 'quotaCooldownHourHint' },
-  { field: 'statsPersistTtlMs', kind: 'number', label: 'statsPersistTtlMs', hint: 'statsPersistTtlMsHint' },
-  { field: 'allowImageFailover', kind: 'bool', label: 'allowImageFailover', hint: 'allowImageFailoverHint' },
+  { field: 'enabled', kind: 'bool', tab: 'general', label: 'enabled', hint: 'enabledHint' },
+  { field: 'maxCandidates', kind: 'number', tab: 'failover', label: 'maxCandidates', hint: 'maxCandidatesHint' },
+  { field: 'confirmSwitch', kind: 'bool', tab: 'failover', label: 'confirmSwitch', hint: 'confirmSwitchHint' },
+  { field: 'confirmTimeoutMs', kind: 'number', tab: 'failover', label: 'confirmTimeoutMs', hint: 'confirmTimeoutMsHint' },
+  { field: 'retriesPerModel', kind: 'number', tab: 'failover', label: 'retriesPerModel', hint: 'retriesPerModelHint' },
+  { field: 'retryBackoffMs', kind: 'number', tab: 'failover', label: 'retryBackoffMs', hint: 'retryBackoffMsHint' },
+  { field: 'preferSameModel', kind: 'bool', tab: 'failover', label: 'preferSameModel', hint: 'preferSameModelHint' },
+  { field: 'noticeSwitch', kind: 'bool', tab: 'general', label: 'noticeSwitch', hint: 'noticeSwitchHint' },
+  { field: 'breakerFailures', kind: 'number', tab: 'cooldown', label: 'breakerFailures', hint: 'breakerFailuresHint' },
+  { field: 'breakerRestMs', kind: 'number', tab: 'cooldown', label: 'breakerRestMs', hint: 'breakerRestMsHint' },
+  { field: 'windowGuard', kind: 'bool', tab: 'general', label: 'windowGuard', hint: 'windowGuardHint' },
+  { field: 'adoptSwitchedModel', kind: 'bool', tab: 'general', label: 'adoptSwitchedModel', hint: 'adoptSwitchedModelHint' },
+  { field: 'cooldownBaseMs', kind: 'number', tab: 'cooldown', label: 'cooldownBaseMs', hint: 'cooldownBaseMsHint' },
+  { field: 'maxCooldownMs', kind: 'number', tab: 'cooldown', label: 'maxCooldownMs', hint: 'maxCooldownMsHint' },
+  { field: 'quotaCooldownMs', kind: 'number', tab: 'cooldown', label: 'quotaCooldownMs', hint: 'quotaCooldownMsHint' },
+  { field: 'quotaCooldownHour', kind: 'number', tab: 'cooldown', label: 'quotaCooldownHour', hint: 'quotaCooldownHourHint' },
+  { field: 'statsPersistTtlMs', kind: 'number', tab: 'cooldown', label: 'statsPersistTtlMs', hint: 'statsPersistTtlMsHint' },
+  { field: 'allowImageFailover', kind: 'bool', tab: 'general', label: 'allowImageFailover', hint: 'allowImageFailoverHint' },
+    ];
+
+    /**
+     * The tabs, in order. Every FIELDS spec names one of these in its `tab`, or
+     * the card throws at render: a field nobody assigned would silently leave the
+     * page. `models` and `routes` own no fields - their panels are the roster and
+     * the route editor, injected instead of a field list.
+     */
+    const TABS = [
+      { key: 'general', label: 'tabs.general' },
+      { key: 'failover', label: 'tabs.failover' },
+      { key: 'cooldown', label: 'tabs.cooldown' },
+      { key: 'models', label: 'tabs.models', panel: true },
+      { key: 'routes', label: 'tabs.routes', panel: true },
     ];
 
     /** Inline layout for the toggle rows; the page ships no stylesheet. */
     const rowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "10px 0" };
     const labelStyle = { display: "flex", flexDirection: "column", gap: "2px" };
     const nameStyle = { fontSize: "13px" };
-    const hintStyle = { fontSize: "12px", opacity: 0.7, maxWidth: "46em" };
+    const hintStyle = { fontSize: "12px", opacity: 0.82, maxWidth: "46em" };
     const controlsStyle = { display: "flex", alignItems: "center", gap: "8px", flex: "0 0 auto" };
     const resetStyle = { background: "transparent", border: "none", color: "inherit", opacity: 0.75, cursor: "pointer", fontSize: "12px", textDecoration: "underline", padding: 0 };
 
@@ -454,16 +497,16 @@ window.__ModuleLoader__.load({
     };
     const listHeadStyle = { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "12px" };
     const listTitleStyle = { fontSize: "13px", fontWeight: 600 };
-    const listHintStyle = { fontSize: "12px", opacity: 0.7, margin: "4px 0 10px", maxWidth: "46em" };
+    const listHintStyle = { fontSize: "12px", opacity: 0.82, margin: "4px 0 10px", maxWidth: "46em" };
     const channelStyle = { marginTop: "12px" };
     const modelRowStyle = { display: "flex", alignItems: "center", gap: "10px", padding: "6px 0", borderTop: "1px solid rgba(128,128,128,0.12)" };
     const modelNameStyle = { fontFamily: "monospace", fontSize: "12px", flex: "1 1 auto", wordBreak: "break-all" };
-    const modelMetaStyle = { fontSize: "11px", opacity: 0.65, flex: "0 0 auto", textAlign: "right" };
+    const modelMetaStyle = { fontSize: "11px", opacity: 0.78, flex: "0 0 auto", textAlign: "right" };
     const dotStyle = (health) => ({ width: "8px", height: "8px", borderRadius: "50%", background: HEALTH_COLOR[health] ?? HEALTH_COLOR.unknown, flex: "0 0 auto" });
     const badgeStyle = (health) => ({ fontSize: "11px", color: HEALTH_COLOR[health] ?? HEALTH_COLOR.unknown, flex: "0 0 auto", minWidth: "4.5em" });
     const routesStyle = { marginTop: "14px", paddingTop: "10px", borderTop: "1px dashed rgba(128,128,128,0.3)" };
     const routeTitleStyle = { fontSize: "13px", fontWeight: 600 };
-    const routeHintStyle = { fontSize: "12px", opacity: 0.7, margin: "4px 0 8px", maxWidth: "46em" };
+    const routeHintStyle = { fontSize: "12px", opacity: 0.82, margin: "4px 0 8px", maxWidth: "46em" };
     // Deliberately NOT the model row's shape. The suite (and, more importantly, a
     // reader) distinguishes "one model row" from "one route row" by their geometry;
     // giving both the same flex/gap/border triple made a route row count as a model
@@ -471,8 +514,8 @@ window.__ModuleLoader__.load({
     const routeRowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "6px 0", borderTop: "1px dotted rgba(128,128,128,0.18)" };
     const routeNameStyle = { fontFamily: "monospace", fontSize: "12px" };
     const routeActiveStyle = { fontSize: "11px", padding: "0 6px", borderRadius: "9px", background: "rgba(64,160,96,0.18)" };
-    const routeMetaStyle = { fontSize: "11px", opacity: 0.72 };
-    const routeMissingStyle = { fontSize: "11px", color: "rgba(200,120,40,0.95)" };
+    const routeMetaStyle = { fontSize: "11px", opacity: 0.8 };
+    const routeMissingStyle = { fontSize: "11px", color: "rgba(214,134,52,1)" };
     /** The fold chevron of one route: a button that reads as text. */
     // Not monospace: that face is the model id's signature on this page, and a
     // chevron wearing it reads as another model row.
@@ -481,26 +524,35 @@ window.__ModuleLoader__.load({
     const routeBodyStyle = { padding: "8px 0 10px 14px", marginTop: "4px", borderLeft: "2px solid rgba(128,128,128,0.2)" };
     const routeFieldLabel = { fontSize: "11px", opacity: 0.65, whiteSpace: "nowrap" };
     /** A member id inside the editor: an id, but not a roster row. */
+    // Monospace stays the roster row's signature — the route editor deliberately
+    // speaks with a different face so a member id never reads as a model row.
     const routeMemberStyle = { fontSize: "12px", wordBreak: "break-all" };
     // Likewise not monospace: the order index is a counter, not an id.
-    const routeOrderStyle = { fontSize: "11px", opacity: 0.55, flex: "0 0 2em", textAlign: "right" };
+    const routeOrderStyle = { fontSize: "11px", opacity: 0.7, flex: "0 0 2em", textAlign: "right" };
     /** The multi-select panel: a boxed region under the member list. */
     const pickerStyle = { marginTop: "8px", padding: "8px", border: "1px solid rgba(128,128,128,0.25)", borderRadius: "4px" };
     const pickerListStyle = { maxHeight: "220px", overflowY: "auto", marginTop: "4px" };
     const pickerRowStyle = { display: "flex", alignItems: "center", gap: "6px", padding: "2px 0", fontSize: "12px" };
     /** A native select, styled to match the search box. */
     const selectStyle = { padding: "4px 6px", fontSize: "12px", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", background: "transparent", color: "inherit" };
-    const smallButtonStyle = { background: "transparent", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", color: "inherit", cursor: "pointer", fontSize: "11px", padding: "2px 8px", flex: "0 0 auto" };
+    const smallButtonStyle = { background: "transparent", border: "1px solid rgba(128,128,128,0.4)", borderRadius: "4px", color: "inherit", cursor: "pointer", fontSize: "11px", padding: "3px 9px", minHeight: "24px", flex: "0 0 auto" };
+    // Disabled must read as disabled: the old style kept full opacity and the
+    // pointer cursor, so while a save was in flight (or a row was already at the
+    // top of the order) every button still invited the click that would be
+    // ignored. One place composes it; every small button gets the same answer.
+    const buttonStyleFor = (disabled) => disabled
+      ? Object.assign({}, smallButtonStyle, { opacity: 0.45, cursor: "default" })
+      : smallButtonStyle;
     const disclosureStyle = { display: "flex", alignItems: "baseline", gap: "6px", width: "100%", background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: "4px 0", textAlign: "left", font: "inherit" };
     const chevronStyle = { fontSize: "10px", opacity: 0.7, width: "1em", flex: "0 0 auto" };
     const groupNameStyle = { fontSize: "12.5px", fontWeight: 600 };
-    const groupMetaStyle = { fontSize: "11px", opacity: 0.6 };
-    const groupHintStyle = { fontSize: "11.5px", opacity: 0.6, margin: "0 0 6px 1.6em", maxWidth: "46em" };
+    const groupMetaStyle = { fontSize: "11px", opacity: 0.75 };
+    const groupHintStyle = { fontSize: "11.5px", opacity: 0.78, margin: "0 0 6px 1.6em", maxWidth: "46em" };
     const channelWrapStyle = { marginLeft: "1.6em" };
     const channelHeadWrapStyle = { marginLeft: "1.6em" };
     const channelDisclosureStyle = Object.assign({}, disclosureStyle, { paddingTop: "2px", paddingBottom: "2px" });
     const channelNameStyle = { fontSize: "12px", flex: "0 0 auto" };
-    const channelTallyStyle = { fontSize: "11px", opacity: 0.65, fontFamily: "monospace" };
+    const channelTallyStyle = { fontSize: "11px", opacity: 0.78, fontFamily: "monospace" };
     const channelTallyStyleDim = Object.assign({}, channelTallyStyle, { opacity: 0.4 });
     const modelWrapStyle = { marginLeft: "1.2em" };
     const channelButtonStyle = Object.assign({}, smallButtonStyle, { marginLeft: "auto" });
@@ -549,7 +601,9 @@ window.__ModuleLoader__.load({
       const saved = props.routes;
       const [drafts, setDrafts] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
-      const [note, setNote] = React.useState("");
+      // The note carries its tone: "路由已保存" and "切换路由失败" are opposite answers
+      // to the same action, and one grey line cannot tell them apart.
+      const [note, setNote] = React.useState({ text: "", kind: "" });
       const [openAt, setOpenAt] = React.useState(-1);
       // Multi-select picker: which route's picker is open, what is ticked, and the
       // filter. Three pieces of local state rather than one object, because a
@@ -561,17 +615,23 @@ window.__ModuleLoader__.load({
       const rows = drafts === null ? saved : drafts;
       const dirty = drafts !== null;
 
-      /** Work on a copy, so an abandoned edit leaves nothing behind. */
+      /** Work on a copy, then write it: there is no Save button on this panel. */
       const edit = (fn) => {
+        // The route page has no Save button of its own: the panel above it owns
+        // one, and expecting a reader to press a page-level control to persist a
+        // row they just typed is the confusion this removes. Every edit therefore
+        // commits the whole table immediately, which is also what the host route
+        // expects (one whole-list replace, never a per-row patch).
         setDrafts((prev) => {
           const base = (prev === null ? saved : prev).map((route) => ({
             ...route,
             members: [...(route.members || [])],
           }));
           fn(base);
+          commit(base);
           return base;
         });
-        setNote("");
+        setNote({ text: "", kind: "" });
       };
 
       const addRoute = () => {
@@ -579,22 +639,26 @@ window.__ModuleLoader__.load({
         const taken = new Set(base.map((route) => route.name));
         let n = base.length + 1;
         while (taken.has(t("route.newName") + " " + n)) n += 1;
-        base.push({ name: t("route.newName") + " " + n, members: [], strategy: "fallback", stickyLimit: 1, enabled: true });
+        const created = t("route.newName") + " " + n;
+        base.push({ name: created, members: [], strategy: "fallback", stickyLimit: 1, enabled: true });
         setDrafts(base);
         setOpenAt(base.length - 1);
-        setNote("");
+        // Say what was written, by name. The previous code cleared the note right
+        // after committing, so creating a route wrote it to disk and then reported
+        // nothing at all - which reads exactly like "the button did nothing".
+        commit(base, fill(t("route.created"), { name: created }));
       };
 
-      const save = () => {
+      /**
+       * Write the whole table now (there is no Save button on this panel).
+       *
+       * The drafts stay in place after a successful write: they ARE the table the
+       * reader is looking at, and clearing them here would make the next keystroke
+       * rebuild from a payload the host has not echoed back yet.
+       */
+      const commit = (table, doneText) => {
         setBusy(true);
-        setNote("");
-        // The payload is built and handed over inside an async IIFE, not as an
-        // argument to Promise.resolve().save(): a synchronous throw from the caller
-        // would escape BEFORE the promise existed, leaving the button stuck on
-        // "saving…" forever with no message - a control that reported progress it was
-        // never making. Everything, including the argument construction, is inside
-        // the try.
-        const settle = (async () => props.save(rows.map((route) => ({
+        const settle = (async () => props.save(table.map((route) => ({
           name: route.name,
           members: route.members,
           strategy: route.strategy,
@@ -605,13 +669,15 @@ window.__ModuleLoader__.load({
           .then((result) => {
             setBusy(false);
             if (result === null || typeof result !== "object" || result.ok !== true) {
-              setNote(t("route.failed") + String((result && result.error) || ""));
+              setNote({ text: t("route.failed") + String((result && result.error) || ""), kind: "err" });
               return;
             }
-            setDrafts(null);
-            setNote(t("route.saved"));
+            setNote({ text: doneText || t("route.saved"), kind: "ok" });
           })
-          .catch((error) => { setBusy(false); setNote(t("route.failed") + String((error && error.message) || error)); });
+          .catch((error) => {
+            setBusy(false);
+            setNote({ text: t("route.failed") + String((error && error.message) || error), kind: "err" });
+          });
       };
 
       const routeNodes = rows.length === 0
@@ -643,7 +709,20 @@ window.__ModuleLoader__.load({
                         // The usable count is shown for saved and for drafted routes alike:
                         // it is derived from the live roster either way, so it answers the same
                         // question ("would this be dispatched") while a draft is open.
-                        jsx("span", { key: "n", style: routeMetaStyle, children: fill(t("route.memberCount"), { n: members.length, ok: props.usableCount(route) }) })
+                        (() => {
+                          const usable = props.usableCount(route);
+                          // A route whose members cannot be dispatched is not a pool,
+                          // it is a list. Saying so in the row header - not only inside
+                          // the fold - is the difference between "my route runs" and
+                          // "my route silently does nothing while the ranking decides".
+                          const broken = members.length > 0 && usable === 0;
+                          return jsx("span", {
+                            key: "n",
+                            style: broken ? Object.assign({}, routeMetaStyle, { color: HEALTH_COLOR.error }) : routeMetaStyle,
+                            "data-route-usability": broken ? "none" : (usable < members.length ? "partial" : "all"),
+                            children: fill(t("route.memberCount"), { n: members.length, ok: usable }),
+                          });
+                        })()
                       ].filter((child) => child !== null)
                     }),
                     jsx("div", {
@@ -654,17 +733,38 @@ window.__ModuleLoader__.load({
                         route.enabled === false ? t("route.off") : ""
                       ].filter((part) => part !== "").join(" \u00b7 ")
                     }),
-                    lost.length === 0 ? null : jsx("div", { key: "lost", style: routeMissingStyle, children: fill(t("route.missing"), { names: lost.join(", ") }) })
+                    lost.length === 0 ? null : jsx("div", {
+                      key: "lost",
+                      "data-route-lost": true,
+                      style: routeMissingStyle,
+                      children: lost.map((id) => {
+                        const twin = /vision/i.test(id);
+                        return fill(twin ? t("route.visionMember") : t("route.missing"), { names: id });
+                      }).join(" · "),
+                    })
                   ].filter((child) => child !== null)
                 }),
                 jsxs("div", {
                   key: "acts",
                   style: { display: "flex", alignItems: "center", gap: "6px", flex: "0 0 auto" },
                   children: [
-                    jsx("button", { key: "up", type: "button", style: smallButtonStyle, disabled: index === 0, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index - 1, 0, m) }), children: "\u2191" }),
-                    jsx("button", { key: "down", type: "button", style: smallButtonStyle, disabled: index === rows.length - 1, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index + 1, 0, m) }), children: "\u2193" }),
-                    jsx("button", { key: "use", type: "button", style: smallButtonStyle, disabled: busy || route.enabled === false, onClick: () => props.activate(route.active ? "" : route.name), children: route.active ? t("route.clear") : t("route.use") }),
-                    jsx("button", { key: "del", type: "button", style: smallButtonStyle, disabled: busy, onClick: () => { edit((base) => { base.splice(index, 1) }); setOpenAt(-1) }, children: t("route.delete") })
+                    jsx("button", { key: "up", type: "button", style: buttonStyleFor(index === 0), disabled: index === 0, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index - 1, 0, m) }), children: "\u2191", title: t("route.moveUp"), "aria-label": t("route.moveUp") }),
+                    jsx("button", { key: "down", type: "button", style: buttonStyleFor(index === rows.length - 1), disabled: index === rows.length - 1, onClick: () => edit((base) => { const [m] = base.splice(index, 1); base.splice(index + 1, 0, m) }), children: "\u2193", title: t("route.moveDown"), "aria-label": t("route.moveDown") }),
+                    // An explicit Save on each row. Edits already write immediately, so
+                    // this is not the only path to disk - but a panel that writes silently
+                    // leaves the reader with no way to confirm, and "did my new route get
+                    // saved" is the question that silence keeps producing. It commits the
+                    // whole table (the host route is whole-table replace) and says so.
+                    jsx("button", {
+                      key: "save",
+                      type: "button",
+                      "data-route-save": route.name,
+                      style: buttonStyleFor(busy),
+                      disabled: busy,
+                      onClick: () => commit(rows, fill(t("route.savedOne"), { name: route.name })),
+                      children: t("route.save"),
+                    }),
+                    jsx("button", { key: "del", type: "button", style: buttonStyleFor(busy), disabled: busy, onClick: () => { edit((base) => { base.splice(index, 1) }); setOpenAt(-1) }, children: t("route.delete") })
                   ]
                 })
               ]
@@ -748,13 +848,13 @@ window.__ModuleLoader__.load({
                             key: "k",
                             "data-route-member": id,
                             style: lost.includes(id)
-                              ? Object.assign({}, routeMemberStyle, { color: "rgba(200,120,40,0.95)" })
+                              ? Object.assign({}, routeMemberStyle, { color: "rgba(214,134,52,1)" })
                               : routeMemberStyle,
                             children: id
                           }),
                           lost.includes(id) ? jsx("span", { key: "w", style: routeMissingStyle, children: t("route.memberMissing") }) : null,
-                          jsx("button", { key: "u", type: "button", style: smallButtonStyle, disabled: at === 0, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at - 1, 0, m) }), children: "\u2191" }),
-                          jsx("button", { key: "d", type: "button", style: smallButtonStyle, disabled: at === members.length - 1, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at + 1, 0, m) }), children: "\u2193" }),
+                          jsx("button", { key: "u", type: "button", style: buttonStyleFor(at === 0), disabled: at === 0, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at - 1, 0, m) }), children: "\u2191", title: t("route.moveUp"), "aria-label": t("route.moveUp") }),
+                          jsx("button", { key: "d", type: "button", style: buttonStyleFor(at === members.length - 1), disabled: at === members.length - 1, onClick: () => edit((base) => { const [m] = base[index].members.splice(at, 1); base[index].members.splice(at + 1, 0, m) }), children: "\u2193", title: t("route.moveDown"), "aria-label": t("route.moveDown") }),
                           jsx("button", { key: "x", type: "button", style: smallButtonStyle, onClick: () => edit((base) => { base[index].members.splice(at, 1) }), children: t("route.memberRemove") })
                         ].filter((child) => child !== null)
                       })),
@@ -829,7 +929,43 @@ window.__ModuleLoader__.load({
                                 available.length > shown.length
                                   ? jsx("div", { key: "trunc", style: routeMetaStyle, children: fill(t("route.pickTruncated"), { n: shown.length }) })
                                   : null,
-                                jsxs("div", { key: "acts", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" }, children: [
+                                jsxs("div", { key: "acts", style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px", flexWrap: "wrap" }, children: [
+                                  // Select-all and invert act on the VISIBLE rows - the
+                                  // filtered view the reader is actually looking at - and
+                                  // never on the whole roster: "all" that silently means
+                                  // 500 rows the filter hid is not a selection, it is a trap.
+                                  jsx("button", {
+                                    key: "all",
+                                    type: "button",
+                                    style: smallButtonStyle,
+                                    "data-route-pick-all": true,
+                                    disabled: shown.length === 0,
+                                    onClick: () => {
+                                      setPicked((prev) => {
+                                        const next = new Set(prev);
+                                        for (const key of shown) next.add(key);
+                                        return [...next];
+                                      });
+                                    },
+                                    children: t("route.pickAll")
+                                  }),
+                                  jsx("button", {
+                                    key: "invert",
+                                    type: "button",
+                                    style: smallButtonStyle,
+                                    "data-route-pick-invert": true,
+                                    disabled: shown.length === 0,
+                                    onClick: () => {
+                                      setPicked((prev) => {
+                                        const next = new Set(prev);
+                                        for (const key of shown) {
+                                          if (next.has(key)) next.delete(key); else next.add(key);
+                                        }
+                                        return [...next];
+                                      });
+                                    },
+                                    children: t("route.pickInvert")
+                                  }),
                                   jsx("button", {
                                     key: "add",
                                     type: "button",
@@ -906,13 +1042,12 @@ window.__ModuleLoader__.load({
           jsxs("div", { key: "head", style: listHeadStyle, children: [
             jsx("div", { key: "t", style: listTitleStyle, children: t("route.title") }),
             jsxs("div", { key: "acts", style: { display: "flex", gap: "8px", flex: "0 0 auto" }, children: [
-              jsx("button", { key: "add", type: "button", style: smallButtonStyle, disabled: busy, onClick: addRoute, children: t("route.new") }),
-              jsx("button", { key: "discard", type: "button", style: smallButtonStyle, disabled: busy || !dirty, onClick: () => { setDrafts(null); setNote("") }, children: t("route.discard") }),
-              jsx("button", { key: "save", type: "button", style: smallButtonStyle, disabled: busy || !dirty, onClick: save, children: busy ? t("route.saving") : t("route.save") })
+              jsx("button", { key: "add", type: "button", style: buttonStyleFor(busy), disabled: busy, onClick: addRoute, children: t("route.new") }),
+              jsx("button", { key: "discard", type: "button", style: buttonStyleFor(busy || !dirty), disabled: busy || !dirty, onClick: () => { setDrafts(null); setNote({ text: "", kind: "" }) }, children: t("route.discard") })
             ] })
           ] }),
           jsx("div", { key: "hint", style: routeHintStyle, children: t("route.hint") }),
-          note === "" ? null : jsx("div", { key: "note", style: { fontSize: "12px", opacity: 0.8, margin: "4px 0" }, children: note }),
+          note.text === "" ? null : jsx("div", { key: "note", style: { fontSize: "12px", margin: "4px 0", color: note.kind === "err" ? HEALTH_COLOR.error : note.kind === "ok" ? HEALTH_COLOR.ok : "inherit", opacity: note.kind === "" ? 0.8 : 1 }, children: note.text }),
           ...routeNodes
         ].filter((child) => child !== null)
       });
@@ -921,6 +1056,16 @@ window.__ModuleLoader__.load({
 
     function ModelList(props) {
       const t = props.t;
+      // The tab bar belongs to the card; this panel answers to it. The component
+      // stays mounted (its fetch, folds and query survive a tab switch) and simply
+      // declines to draw while another tab is in force: a 900-row list rendered
+      // behind a hidden tab is the waste this guard stops.
+      // Tabs answer by VISIBILITY, never by mounting: the whole tree - the
+      // roster, its fetches and folds, and the route editor with its unsaved
+      // drafts - stays mounted under every tab, and only the wrappers display
+      // changes. An early return would drop the drafts with the remount; a
+      // hidden 900-row list costs the browser no paint, which is the only
+      // saving worth taking.
       const [state, setState] = React.useState({ status: "loading", data: null, error: "" });
       const [busy, setBusy] = React.useState("");
       const [note, setNote] = React.useState("");
@@ -1143,8 +1288,8 @@ window.__ModuleLoader__.load({
           .then(() => { setBusy(""); });
       }, [t]);
 
-      const children = [];
-      children.push(jsxs("div", {
+      const roster = [];
+      roster.push(jsxs("div", {
         key: "head",
         style: listHeadStyle,
         children: [
@@ -1156,7 +1301,7 @@ window.__ModuleLoader__.load({
               jsx("button", {
                 key: "reload",
                 type: "button",
-                style: smallButtonStyle,
+                style: buttonStyleFor(state.status === "loading"),
                 disabled: state.status === "loading",
                 onClick: () => { void load(); },
                 children: t("models.reload")
@@ -1164,7 +1309,7 @@ window.__ModuleLoader__.load({
               jsx("button", {
                 key: "expand",
                 type: "button",
-                style: smallButtonStyle,
+                style: buttonStyleFor(!open),
                 disabled: !open,
                 onClick: () => foldAll(false),
                 children: t("models.expandAll")
@@ -1172,7 +1317,7 @@ window.__ModuleLoader__.load({
               jsx("button", {
                 key: "collapse",
                 type: "button",
-                style: smallButtonStyle,
+                style: buttonStyleFor(!open),
                 disabled: !open,
                 onClick: () => foldAll(true),
                 children: t("models.collapseAll")
@@ -1204,7 +1349,12 @@ window.__ModuleLoader__.load({
         const push = (rows) => {
           for (const row of Array.isArray(rows) ? rows : []) {
             const key = typeof row === "string" ? row : String((row && row.key) || "");
-            if (key !== "" && !out.includes(key)) out.push(key);
+            // A route aggregates models that can answer a text turn. The vision
+            // twins are the same model behind the image pipeline, and the server
+            // already names them (kind === "vision"), so they never enter the
+            // picker's list or its datalist. The judgement stays single-sourced
+            // in the shipped exclusion rule; the client only reads its answer.
+            if (key !== "" && !out.includes(key) && (typeof row === "string" || row.kind !== "vision")) out.push(key);
           }
         };
         if (Array.isArray(data.models) && data.models.length > 0) push(data.models);
@@ -1291,7 +1441,7 @@ window.__ModuleLoader__.load({
       // takes, so it belongs ahead of the list that shows what is available. Like the
       // roster it sits outside the staged form (it writes config.json row by row), so
       // a refresh there cannot discard a half-typed number above it.
-      children.push(jsx(RouteEditor, {
+      const routesPane = jsx("div", { key: "__routes-pane", "data-tab-pane": "routes", style: { display: props.activeTab === "routes" ? "block" : "none" }, children: jsx(RouteEditor, {
         key: "__routes",
         t: t,
         rosterKeys: rosterKeys(),
@@ -1299,11 +1449,11 @@ window.__ModuleLoader__.load({
         usableCount: usableCountOf,
         save: saveRoutes,
         activate: activateRoute,
-      }));
+      }) });
       // The box. Kept outside the settings form for the same reason the roster is:
       // it is a view control over a live roster, not a value the page stages and
       // saves, and typing in it must never look like an unsaved edit.
-      children.push(jsxs("div", {
+      roster.push(jsxs("div", {
         key: "search",
         style: { display: "flex", alignItems: "center", gap: "8px", margin: "10px 0 6px" },
         children: [
@@ -1328,7 +1478,7 @@ window.__ModuleLoader__.load({
         ].filter((child) => child !== null)
       }));
       if (searching) {
-        children.push(jsx("div", {
+        roster.push(jsx("div", {
           key: "hits",
           style: { fontSize: "12px", opacity: 0.75, marginBottom: "6px" },
           children: matchedCount() === 0
@@ -1339,7 +1489,7 @@ window.__ModuleLoader__.load({
               })
         }));
       } else {
-        children.push(jsx("div", { key: "hint", style: listHintStyle, children: t("models.hint") }));
+        roster.push(jsx("div", { key: "hint", style: listHintStyle, children: t("models.hint") }));
       }
 
       /**
@@ -1423,7 +1573,7 @@ window.__ModuleLoader__.load({
               ? jsx("button", {
                   key: "switch",
                   type: "button",
-                  style: smallButtonStyle,
+                  style: buttonStyleFor(busy === row.key),
                   disabled: busy === row.key,
                   onClick: () => toggle(row, row.health === "off"),
                   children: row.health === "off" ? t("models.enable") : t("models.disable")
@@ -1462,7 +1612,7 @@ window.__ModuleLoader__.load({
       })();
       if (sections !== null && sections.length > 0) {
         const disabled = data.models.filter((row) => row.health === "off").length;
-        children.push(jsx("div", {
+        roster.push(jsx("div", {
           key: "summary",
           style: { fontSize: "12px", opacity: 0.75 },
           children: fill(t("models.summary"), { total: data.total, rotating: data.inRotation, disabled: disabled })
@@ -1480,13 +1630,13 @@ window.__ModuleLoader__.load({
           // Searching should reveal, not hide: a hit inside a folded channel would
           // otherwise be invisible, which is exactly what the box was opened to fix.
           const shown = searching || folded[group.key] !== true;
-          children.push(disclosure(
+          roster.push(disclosure(
             group.key,
             t("models.group." + group.key),
             fill(t("models.counts"), Object.assign({ n: tallyOf(matched).total }, tallyOf(matched)))
           ));
           if (!shown) continue;
-          children.push(jsx("div", { key: group.key + "#hint", style: groupHintStyle, children: t("models.groupHint." + group.key) }));
+          roster.push(jsx("div", { key: group.key + "#hint", style: groupHintStyle, children: t("models.groupHint." + group.key) }));
           const wrap = [];
           for (const channel of matched) {
             const channelKey = group.key + "/" + channel.provider;
@@ -1558,22 +1708,34 @@ window.__ModuleLoader__.load({
             }
             wrap.push(jsx("div", { key: channelKey, style: channelStyle, children: rows }));
           }
-          children.push(jsx("div", { key: group.key + "#rows", style: channelWrapStyle, children: wrap }));
+          roster.push(jsx("div", { key: group.key + "#rows", style: channelWrapStyle, children: wrap }));
         }
       } else if (!open) {
         // Collapsed: the header and the counter stay, the rows do not.
-        children.push(jsx("div", { key: "collapsed", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.hint") }));
+        roster.push(jsx("div", { key: "collapsed", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.hint") }));
       } else if (state.status === "loading") {
-        children.push(jsx("div", { key: "loading", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.loading") }));
+        roster.push(jsx("div", { key: "loading", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.loading") }));
       } else if (state.status === "failed") {
-        children.push(jsx("div", { key: "failed", style: { fontSize: "12px", color: HEALTH_COLOR.error }, children: t("models.failed") + state.error }));
+        // A dead read with no way out is a dead end: the refresh button lives in
+        // the header and scrolls away on a long page, and the reader who just
+        // learned the roster could not load wants the retry *at the error*.
+        roster.push(jsxs("div", { key: "failed", style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: HEALTH_COLOR.error }, children: [
+          jsx("span", { key: "m", children: t("models.failed") + state.error }),
+          jsx("button", { key: "r", type: "button", style: buttonStyleFor(false), onClick: () => load(), children: t("models.retry") }),
+        ] }));
       } else {
-        children.push(jsx("div", { key: "empty", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.empty") }));
+        roster.push(jsx("div", { key: "empty", style: { fontSize: "12px", opacity: 0.7 }, children: t("models.empty") }));
       }
       if (note !== "") {
-        children.push(jsx("div", { key: "note", style: { fontSize: "12px", opacity: 0.8, marginTop: "8px" }, children: note }));
+        roster.push(jsx("div", { key: "note", style: { fontSize: "12px", opacity: 0.8, marginTop: "8px" }, children: note }));
       }
-      return jsx("div", { key: "models", "data-model-list": true, style: listStyle, children: children });
+      // Two sibling panes, never nested: a hidden ancestor would hide the
+      // routes pane along with the roster, and every unsaved draft inside it
+      // would disappear from a tab switch instead of waiting for the next one.
+      return jsxs("div", { key: "models", children: [
+        jsx("div", { key: "__models-pane", "data-model-list": true, style: Object.assign({}, listStyle, { display: props.activeTab === undefined || props.activeTab === "models" ? "block" : "none" }), children: roster }),
+        routesPane,
+      ] });
     }
     //#endregion
 
@@ -1801,7 +1963,38 @@ window.__ModuleLoader__.load({
       const t = props.t;
       const state = props.useModelRotatorCard((snapshot) => snapshot);
       if (props.view === "summary") return t("description");
-      const children = FIELDS.map((spec) => {
+      // One tab in force at a time. The page lands on its first tab: a
+      // settings page opens on settings, not on the 900-row list; the
+      // roster fetch still starts on mount, so switching to it draws instantly.
+      const [activeTab, setActiveTab] = React.useState("general");
+      const tabRows = TABS.map((tab) => jsx("button", {
+        key: "tab-" + tab.key,
+        type: "button",
+        "data-tab": tab.key,
+        "aria-pressed": activeTab === tab.key,
+        style: Object.assign({}, smallButtonStyle, {
+          fontWeight: activeTab === tab.key ? 700 : 400,
+          borderRadius: "4px 4px 0 0",
+          borderBottom: activeTab === tab.key
+            ? "2px solid rgba(128,128,128,0.65)"
+            : "2px solid transparent",
+        }),
+        onClick: () => setActiveTab(tab.key),
+        children: t(tab.label),
+      }));
+      const children = [jsxs("div", {
+        key: "__tabs",
+        "data-tab-bar": true,
+        style: { display: "flex", gap: "6px", flexWrap: "wrap", borderBottom: "1px solid rgba(128,128,128,0.25)", marginBottom: "6px" },
+        children: tabRows,
+      })];
+      // The field list carries its tab as data (see FIELDS); this is the only
+      // distribution point, and an unassigned field throws rather than silently
+      // dropping a knob off the page. Rows are DRAWN and hidden, not omitted:
+      // the staged form collects every field on save, so a field that vanished
+      // with the tab would be saved as unset.
+      FIELDS.map((spec) => {
+        if (spec.tab === undefined) throw new Error("model-rotator: field " + spec.field + " has no tab");
         const fieldState = state[spec.field] === undefined ? {} : state[spec.field];
         if (spec.kind === "number") {
           return jsx(P.SettingsValueField, {
@@ -1829,8 +2022,13 @@ window.__ModuleLoader__.load({
           onEdit: (text) => props.edit(spec.field, text),
           onReset: () => props.resetField(spec.field)
         });
-      });
-      children.push(jsx("p", {
+      }).forEach((row, index) => children.push(jsx("div", {
+        key: FIELDS[index].field + "-pane",
+        "data-tab-pane": FIELDS[index].tab,
+        style: { display: FIELDS[index].tab === activeTab ? "block" : "none" },
+        children: row,
+      })));
+      if (activeTab === "general") children.push(jsx("p", {
         key: "__note",
         style: { margin: "12px 0 0", fontSize: "12px", opacity: 0.6 },
         children: t("note")
@@ -1838,13 +2036,70 @@ window.__ModuleLoader__.load({
       // The roster lives inside the same frame but outside the staged form: its
       // rows are saved one at a time, straight to config.json, so a refresh there
       // cannot discard a half-typed number in the settings above it.
-      children.push(jsx(ModelList, { key: "__models", t: t }));
-      return jsx(P.SettingsForm, {
-        labels: formLabels(t),
-        state: state,
-        onSave: props.save,
-        onDiscard: props.discard,
-        children: children
+      children.push(jsx(ModelList, { key: "__models", t: t, activeTab: activeTab }));
+      // The tab's own dirty flag and its own save. A page-wide flag lights Save up
+      // on every tab the moment anything anywhere is edited, and a page-wide save
+      // commits edits the reader never looked at.
+      const tabFields = FIELDS.filter((spec) => spec.tab === activeTab).map((spec) => spec.field);
+      const stagedFields = Array.isArray(state.staged) ? state.staged : [];
+      const tabDirty = tabFields.some((field) => stagedFields.includes(field));
+      const tabState = Object.assign({}, state, { dirty: tabDirty });
+      // The host SettingsForm hardcodes a footer Save button (its VZ body renders
+      // <div className=footer><button>unconditionally - there is no prop to omit
+      // it). That footer is the "保存" that kept reappearing under the tab bar.
+      // So the frame is drawn here instead: the field rows and the roster come
+      // through unchanged, the footer does not, and save stays where it belongs -
+      // on the tab that owns the fields, via the route panel and the roster rows
+      // which write their own state directly.
+      return jsxs("div", {
+        className: "model-rotator-settings",
+        "data-settings-frame": true,
+        style: { display: "flex", flexDirection: "column", gap: "0px" },
+        children: [
+          state.available === false
+            ? jsx("p", { key: "unavail", role: "status", style: { opacity: 0.7, fontSize: "12px" }, children: t("unavailable") })
+            : null,
+          state.writable === false
+            ? jsx("p", { key: "ro", role: "status", style: { opacity: 0.7, fontSize: "12px" }, children: t("readOnly") })
+            : null,
+          ...children,
+          // Per-tab commit, in place of the host footer - and ONLY on tabs that own
+          // staged fields. The routes tab writes every edit immediately, so a Save
+          // there would have nothing to save; showing one (disabled, at the bottom)
+          // is precisely what made "how do I save a new route" a question.
+          tabFields.length === 0 ? null : jsxs("div", {
+            key: "__tab-save",
+            "data-tab-save": activeTab,
+            style: { display: "flex", alignItems: "center", gap: "8px", marginTop: "14px", paddingTop: "12px", borderTop: "1px solid rgba(128,128,128,0.18)" },
+            children: [
+              jsx("button", {
+                type: "button",
+                "data-tab-save-button": true,
+                disabled: !tabDirty || state.invalid === true || state.saving === true,
+                onClick: () => {
+                  if (typeof props.saveTab === "function") { props.saveTab(tabFields); return; }
+                  props.save();
+                },
+                children: state.saving === true ? t("saving") : t("save"),
+              }),
+              tabDirty
+                ? jsx("button", {
+                    type: "button",
+                    "data-tab-discard-button": true,
+                    disabled: state.saving === true,
+                    onClick: () => {
+                      if (typeof props.discardTab === "function") { props.discardTab(tabFields); return; }
+                      props.discard();
+                    },
+                    children: t("discard"),
+                  })
+                : null,
+              state.failed === true
+                ? jsx("span", { role: "status", style: { fontSize: "12px", color: "#d9534f" }, children: t("saveFailed") })
+                : null,
+            ].filter(Boolean),
+          }),
+        ].filter(Boolean),
       });
     }
     //#endregion
@@ -1881,11 +2136,74 @@ window.__ModuleLoader__.load({
       projection() {
         const snapshot = Object.assign({}, this.form.shell());
         for (const spec of FIELDS) snapshot[spec.field] = this.form.field(spec.field);
+        // Which fields carry an unsaved edit. The card scopes its save button by
+        // tab, and "is this tab dirty" cannot come from the global flag - that
+        // one is true while any OTHER tab holds an edit.
+        snapshot.staged = this.stagedFields();
         return snapshot;
       }
+
+      /** The field names currently staged, or [] when the form cannot report. */
+      stagedFields() {
+        const staged = this.form.staged;
+        if (staged === undefined || staged === null || typeof staged.keys !== 'function') return [];
+        return [...staged.keys()];
+      }
+
+      /**
+       * Save only the named fields, leaving every other staged edit staged.
+       *
+       * The host saves whatever is staged, all of it - the right unit for a
+       * one-page form, the wrong one for a tabbed page: pressing Save on "Switch
+       * policy" must not also commit a half-typed number left on "Cooldown".
+       * Out-of-scope entries are lifted out for the write and put back after,
+       * including on failure, where they are exactly as unsaved as before.
+       */
+      async saveTab(fields) {
+        const scope = new Set(Array.isArray(fields) ? fields : []);
+        const staged = this.form.staged;
+        const held = [];
+        if (staged !== undefined && staged !== null && typeof staged.entries === 'function') {
+          for (const [name, value] of [...staged.entries()]) {
+            if (scope.has(name)) continue;
+            held.push([name, value]);
+            staged.delete(name);
+          }
+        }
+        try {
+          await this.form.save();
+        } finally {
+          for (const [name, value] of held) staged.set(name, value);
+          if (held.length > 0 && typeof this.form.publish === 'function') this.form.publish();
+        }
+      }
+
+      /**
+       * Discard only the named fields, leaving every other tab's draft alone.
+       *
+       * The host's discard clears the whole staging area, which on a tabbed page
+       * is a data-loss button: it throws away edits on panels nobody is looking
+       * at and says nothing about it.
+       */
+      discardTab(fields) {
+        const scope = new Set(Array.isArray(fields) ? fields : []);
+        const staged = this.form.staged;
+        if (staged !== undefined && staged !== null && typeof staged.delete === 'function') {
+          for (const name of [...staged.keys()]) if (scope.has(name)) staged.delete(name);
+          if (typeof this.form.publish === 'function') this.form.publish();
+        }
+        this.form.failed = false;
+      }
+
       /** The face the page's slot registration injects. */
       inject() {
-        return Object.assign({ hooks: { modelRotatorCard: this.store } }, this.form.actions());
+        return Object.assign({ hooks: { modelRotatorCard: this.store } }, this.form.actions(), {
+          // The controller itself, so the suite can prove what a scoped save
+          // does to staging; the host only ever calls the actions above.
+          __controller: this,
+          saveTab: (fields) => this.saveTab(fields),
+          discardTab: (fields) => this.discardTab(fields),
+        });
       }
       dispose() {
         this.form.dispose();

@@ -1497,8 +1497,10 @@ const quietHandle = (value) => ({
     const first = attempts[0]
     return attempts.find(a => a !== first)
   }
-  check('a healthy pin is tried first after the current model',
-    healthy[0] === 'provA/alpha' && secondModel(healthy) === 'provA/beta',
+  // A pin is an explicit request for this head: the pin HEADS the walk, and the
+  // session model keeps its seat in the order (still tried, never lost).
+  check('a healthy pin heads the walk',
+    healthy[0] === 'provA/beta' && healthy.includes('provA/alpha'),
     'order=' + healthy.join(','))
 
   // Hydration is a once-per-boot step, so a second harness in this process would
@@ -1861,25 +1863,40 @@ const quietHandle = (value) => ({
     return h
   }
 
-  // 25a: an ordered route heads the walk, right after the model the turn started on.
+  // 25a: with a pool active, a turn whose model belongs to that pool walks the pool.
+  // The premise is deliberate: nobody leaves the picker empty, so the turn always
+  // carries an explicit model. When that model is a member of the declared route,
+  // the route is what the user meant and it leads; when it is NOT, the user's own
+  // pick outranks the declaration (25a2).
   const ordered = await routesPair({
     routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
     activeRoute: 'write',
   })
-  await collect(ordered.run({ provider: 'provA', model: 'alpha', messages: [] }))
-  check('25a a declared route is tried before the measured ranking',
-    ordered.attempted[0] === 'provA/alpha' && ordered.attempted[1] === 'provB/gamma' && ordered.attempted[2] === 'provA/beta',
+  await collect(ordered.run({ provider: 'provA', model: 'beta', messages: [] }))
+  check('25a an active route heads the walk in its own order',
+    ordered.attempted[0] === 'provB/gamma' && ordered.attempted[1] === 'provA/beta',
     'attempted=' + ordered.attempted.join(','))
+
+  // 25a2: the user picks a model that is NOT in the declared route. That pick wins:
+  // a declared default must never rewrite a model chosen by hand.
+  const bypass = await routesPair({
+    routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
+    activeRoute: 'write',
+  })
+  await collect(bypass.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('25a2 an explicit pick outside the route is not displaced by it',
+    bypass.attempted[0] === 'provA/alpha',
+    'attempted=' + bypass.attempted.join(','))
 
   // 25b: fallback restarts at the head every turn - that is what makes it predictable.
   const twice = await routesPair({
     routes: [{ name: 'write', members: ['provB/gamma', 'provA/beta'] }],
     activeRoute: 'write',
   })
-  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  await collect(twice.run({ provider: 'provA', model: 'beta', messages: [] }))
   const firstTurn = twice.attempted.slice()
   twice.attempted.length = 0
-  await collect(twice.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  await collect(twice.run({ provider: 'provA', model: 'beta', messages: [] }))
   check('25b fallback restarts from the head on the next turn',
     JSON.stringify(firstTurn) === JSON.stringify(twice.attempted),
     'turn1=' + firstTurn.join(',') + ' turn2=' + twice.attempted.join(','))
@@ -1906,8 +1923,8 @@ const quietHandle = (value) => ({
   const stickyHeads = []
   for (let turn = 0; turn < 3; turn += 1) {
     sticky.attempted.length = 0
-    await collect(sticky.run({ provider: 'provA', model: 'alpha', messages: [] }))
-    stickyHeads.push(sticky.attempted[1])
+    await collect(sticky.run({ provider: 'provA', model: 'beta', messages: [] }))
+    stickyHeads.push(sticky.attempted[0])
   }
   check('25c2 stickyLimit keeps a member for that many turns',
     stickyHeads[0] === stickyHeads[1] && stickyHeads[1] !== stickyHeads[2],
@@ -2089,6 +2106,285 @@ const quietHandle = (value) => ({
   const fieldCount = Number((fieldLine.match(/live, (\d+) fields/) ?? [])[1] ?? -1)
   check('25j the two breaker fields are declared on the settings page',
     fieldCount >= 18, fieldLine)
+}
+
+
+// ---- scenario 33: a declared route is one selectable pool -------------------
+// The aggregation used to live only inside the walk: the picker kept showing the
+// session model, so "run this pool" was not an action anyone could take. A route
+// now publishes one live adapter route (combo:<name>), which is what the host's
+// picker lists - and selecting it makes that pool lead the turn.
+{
+  const mk = async (fileConfig) => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs')
+    const dir = mkdtempSync(join(tmpdir(), 'rotator-combo-'))
+    const cfgPath = join(dir, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify(fileConfig), 'utf8')
+    process.env.DSH_MODEL_ROTATOR_CONFIG = cfgPath
+    const h = makeCtx((options, n) => (n <= 1
+      ? [{ type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited' } } }]
+      : [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }]))
+    const published = { names: [], replaces: 0 }
+    // Non-combo providers keep the harness's own roster stub: answering them with
+    // an empty catalog would make every route member look undispatched.
+    const baseRegistration = h.ctx.llm.registration
+    const lookup = () => {
+      h.ctx.llm.registration = (provider) => (published.names.includes(provider)
+        ? { adapter: h.ctx.llm.__comboAdapter }
+        : baseRegistration(provider))
+    }
+    h.ctx.llm.registerAdapter = (providers) => {
+      published.names = [...providers]
+      lookup()
+      return {
+        replace: (next) => {
+          published.replaces += 1
+          published.names = [...next]
+          lookup()
+        },
+      }
+    }
+    apply(h.ctx, { retriesPerModel: 0, confirmSwitch: false, maxCandidates: 6 }, {})
+    return { h, published }
+  }
+
+  const a = await mk({ routes: [{ name: 'free-pool', members: ['provA/beta', 'provB/gamma'] }], activeRoute: '' })
+  check('33a an enabled route is published as one combo pool',
+    JSON.stringify(a.published.names) === JSON.stringify(['combo:free-pool']),
+    JSON.stringify(a.published.names))
+
+  const b = await mk({
+    routes: [
+      { name: 'on', members: ['provA/beta'] },
+      { name: 'off', members: ['provB/gamma'], enabled: false },
+    ],
+    activeRoute: '',
+  })
+  check('33b a disabled route is not published into the picker',
+    JSON.stringify(b.published.names) === JSON.stringify(['combo:on']),
+    JSON.stringify(b.published.names))
+
+  const rows = await b.h.ctx.llm.registration('combo:on').adapter.listModels('combo:on')
+  check('33c the pool advertises itself as its catalog row',
+    Array.isArray(rows) && rows.length === 1 && rows[0].id === 'combo:on',
+    JSON.stringify(rows))
+
+  const d = await mk({
+    routes: [
+      { name: 'chosen', members: ['provB/gamma'] },
+      { name: 'declared', members: ['provA/beta'] },
+    ],
+    activeRoute: 'declared',
+  })
+  await collect(d.h.run({ provider: 'combo:chosen', model: 'combo:chosen', messages: [] }))
+  check('33d a selected pool outranks activeRoute for that turn',
+    d.h.attempted[0] === 'provB/gamma',
+    'attempted=' + d.h.attempted.join(','))
+  // The picker does not read listModels() alone: buildModelCatalog() (the host's
+  // session/modelCatalog remote) calls resolveModelInfo() for EVERY row and files
+  // a provider under `failures` - not `groups` - when that throws. Publishing a
+  // pool is therefore not the same as the pool being SELECTABLE, and only this
+  // assertion covers the difference.
+  {
+    const adapter = d.h.ctx.llm.__comboAdapter
+    const info = adapter === undefined ? null : await adapter.resolveModel('combo:chosen', 'combo:chosen')
+    const valid = info !== null
+      && info.provider === 'combo:chosen' && info.id === 'combo:chosen'
+      && typeof info.name === 'string' && info.name.length > 0
+      && (info.description === undefined || typeof info.description === 'string')
+      && Number.isInteger(info.context?.contextWindow) && info.context.contextWindow > 0
+    check('33f the pool passes the exact-model validation the picker runs', valid, JSON.stringify(info))
+    // And the honest contract shape, in case the host is stricter later:
+    check('33g the pool advertises a context window the host accepts',
+      valid && info.context.contextWindow >= 1, JSON.stringify(info?.context))
+  }
+  check('33e a pool name is never dispatched as a model',
+    !d.h.attempted.includes('combo:chosen/combo:chosen'),
+    'attempted=' + d.h.attempted.join(','))
+}
+// ---- scenario 26: a turn the caller cancelled is not a failed model ----------
+//
+// Stop, a deadline, a closed client: the provider ends the stream with a finish of
+// kind 'aborted' and the route itself told us nothing. Counting that as a failure
+// priced a healthy model out of the ranking (60s, doubling) and, five cancellations
+// in a row, tripped the breaker and rested it for six hours. Read from the report
+// the user reads, so the assertion covers the accounting and the display together.
+{
+  const ac = new AbortController()
+  const h = makeCtx(() => {
+    ac.abort()
+    return [{ type: 'finish', reason: { kind: 'aborted' } }]
+  })
+  apply(h.ctx, { retriesPerModel: 0 }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [], signal: ac.signal }))
+  const report = await h.registered.get('model_rotator_status').execute({ summary: true }, {})
+  const seen = report.split('\n').find(line => /last failure seen/.test(line)) ?? ''
+  check('26a a cancelled turn records no failure', /nothing recorded yet/.test(seen), seen.trim())
+  check('26b the cancelled finish still reaches the caller',
+    chunks.filter(c => c.type === 'finish' && c.reason?.kind === 'aborted').length === 1, JSON.stringify(chunks))
+  check('26c no candidate was dialed after the cancel', h.attempted.length === 1, 'attempted=' + h.attempted.join(','))
+
+  // Five cancellations in a row must not add up to a breaker.
+  for (let i = 0; i < 5; i += 1) {
+    const per = new AbortController()
+    const hh = makeCtx(() => { per.abort(); return [{ type: 'finish', reason: { kind: 'aborted' } }] })
+    apply(hh.ctx, { retriesPerModel: 0, breakerFailures: 2 }, {})
+    await collect(hh.run({ provider: 'provA', model: 'alpha', messages: [], signal: per.signal }))
+    if (i === 4) {
+      const last = await hh.registered.get('model_rotator_status').execute({ summary: true }, {})
+      check('26d five cancellations do not trip the breaker',
+        /nothing recorded yet/.test(last.split('\n').find(line => /last failure seen/.test(line)) ?? ''), '')
+    }
+  }
+}
+
+// ---- scenario 27: a stream that ends without a finish chunk ------------------
+// The chunks an attempt emits before its first content are held so a retry can drop
+// them. When the provider simply ends - no finish at all - they used to be dropped
+// with the attempt, so the caller received an empty turn.
+{
+  const h = makeCtx(() => [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'usage', usage: { totalTokens: 5 } },
+  ])
+  apply(h.ctx, {}, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('27a held chunks are delivered when the stream just ends',
+    chunks.length === 2 && chunks[0].type === 'block-start' && chunks[1].type === 'usage', JSON.stringify(chunks))
+}
+
+// ---- scenario 28: a window is resolved once, not once per turn ---------------
+// Every turn resolved the window of every discoverable route (240 adapter calls on a
+// 240-row roster): a model's context window is a catalog fact, not a per-turn one.
+{
+  const windows = { 'provA/alpha': 200000, 'provA/beta': 200000, 'provB/gamma': 200000 }
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }],
+    undefined, { pressure: { tokens: 1000, window: 128000 }, windows })
+  apply(h.ctx, {}, {})
+  let calls = 0
+  const realResolve = h.ctx.llm.resolveModelInfo
+  h.ctx.llm.resolveModelInfo = async (provider, model) => { calls += 1; return realResolve(provider, model) }
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const first = calls
+  calls = 0
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('28a the first turn resolves the windows it ranks', first > 0, 'resolved=' + first)
+  check('28b a later turn reuses them instead of re-resolving', calls === 0, 'resolved again=' + calls)
+}
+
+// ---- scenario 29: a stale roster is served, not re-swept on the turn ---------
+// The roster TTL was the turn's problem: once it lapsed, the next turn awaited a
+// full listModels() sweep - 15 seconds on the live install. It is now served stale
+// and refreshed behind the turn.
+{
+  const realNow = Date.now
+  let offset = 0
+  let listCalls = 0
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+  const realRegistration = h.ctx.llm.registration
+  h.ctx.llm.registration = (provider) => {
+    const entry = realRegistration(provider)
+    return { ...entry, adapter: { listModels: async (p) => { listCalls += 1; await new Promise(r => setTimeout(r, 60)); return entry.adapter.listModels(p) } } }
+  }
+  apply(h.ctx, {}, {})
+  try {
+    Date.now = () => realNow() + offset
+    const coldStart = realNow()
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const cold = realNow() - coldStart
+    offset += 61_000
+    const afterFirst = listCalls
+    const warmStart = realNow()
+    await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+    const warm = realNow() - warmStart
+    check('29a the first turn pays the sweep', cold >= 50, 'cold=' + cold + 'ms')
+    check('29b a stale roster does not block the turn', warm < 40, 'stale turn=' + warm + 'ms')
+    await new Promise(r => setTimeout(r, 250))
+    check('29c the roster is refreshed behind the turn', listCalls > afterFirst, 'listModels calls=' + afterFirst + '->' + listCalls)
+  } finally {
+    Date.now = realNow
+  }
+}
+
+// ---- scenario 30: a stream that throws is a content-free failure -------------
+// A transport that throws instead of emitting a finish used to end the turn: the
+// exception travelled out of the wrapper, so the plugin never tried another route.
+{
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'unused' }])
+  h.ctx.llm.stream = (options) => {
+    h.attempted.push(options.provider + '/' + options.model)
+    return (async function* () {
+      if (options.provider === 'provA') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        throw new Error('socket hang up')
+      }
+      yield { type: 'text-delta', index: 0, text: 'from ' + options.model }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()
+  }
+  apply(h.ctx, { retriesPerModel: 0 }, {})
+  const chunks = await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  check('30a a throwing stream fails over to a working route',
+    chunks.some(c => c.type === 'text-delta' && c.text === 'from beta') || chunks.some(c => c.type === 'text-delta' && c.text === 'from gamma'),
+    'attempted=' + h.attempted.join(',') + ' chunks=' + JSON.stringify(chunks.map(c => c.type)))
+
+  // Nothing answers: the caller gets the provider's own exception, as it would
+  // without this plugin in the path.
+  const dead = makeCtx(() => [])
+  dead.ctx.llm.stream = (options) => (async function* () { throw new Error('socket hang up') })()
+  apply(dead.ctx, { retriesPerModel: 0 }, {})
+  let caught = ''
+  try { await collect(dead.run({ provider: 'provA', model: 'alpha', messages: [] })) } catch (error) { caught = String(error.message) }
+  check('30b with nothing left to try the original exception is rethrown', caught === 'socket hang up', JSON.stringify(caught))
+}
+
+// ---- scenario 31: the sentences this install actually answers with -----------
+// Read out of the live stats.json on 2026-11-16, where they sat unclassified: a
+// missing browser login, a provider whose request frequency wall says "频率超限",
+// a queue that timed out, and a provider this host has no adapter for at all.
+{
+  check('31a a missing browser login is an auth failure',
+    classifyFailureKind('还没有浏览器登录态。请在豆包卡片里点「重新登录」扫码一次。') === 'auth', '')
+  check('31b a frequency wall is a rate limit',
+    classifyFailureKind('raccoon: 您的模型请求频率超限，请稍后重试') === 'rate-limit', '')
+  check('31c a queue timeout is a rate limit',
+    classifyFailureKind('qoder: 排队等待超时') === 'rate-limit', '')
+  check('31d a provider with no adapter is a dead route',
+    classifyFailureKind('no adapter registered for provider "workbuddy"') === 'unsupported', '')
+}
+
+
+// ---- scenario 32: one wedged adapter cannot stall every turn -----------------
+// The sweep walks every provider's listModels() in turn, so one provider that never
+// answers used to hold the whole roster - and every turn behind it - hostage. The
+// first turn now gives up after the budget and the ones that follow do not pay it
+// again while the sweep is still outstanding.
+{
+  let hanging = false
+  const h = makeCtx(() => [{ type: 'text-delta', index: 0, text: 'ok' }, { type: 'finish', reason: { kind: 'stop' } }])
+  const realRegistration = h.ctx.llm.registration
+  h.ctx.llm.registration = (provider) => {
+    const entry = realRegistration(provider)
+    return {
+      ...entry,
+      adapter: {
+        listModels: async (p) => {
+          if (hanging && p === 'provB') await new Promise(() => {})
+          return entry.adapter.listModels(p)
+        },
+      },
+    }
+  }
+  hanging = true
+  apply(h.ctx, {}, {})
+  const t0 = Date.now()
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const cold = Date.now() - t0
+  check('32a a wedged adapter is capped by the first-sweep budget', cold < 4500, 'cold turn=' + cold + 'ms')
+  const t1 = Date.now()
+  await collect(h.run({ provider: 'provA', model: 'alpha', messages: [] }))
+  const second = Date.now() - t1
+  check('32b the next turn does not pay the same wait again', second < 500, 'second turn=' + second + 'ms')
 }
 
 const failed = results.filter(r => r[0] === 'FAIL')
